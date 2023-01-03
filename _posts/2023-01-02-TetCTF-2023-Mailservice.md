@@ -179,11 +179,13 @@ Pretty long, right? Simplified,
 1. It first reads 3 bytes from the FIFO. These act as a "command", which can either be ATF, SET, NEW, UPD or ATE
 2. In the case of any command that is not UPD, it also reads a decimal string of 3 bytes(e.g "004") as the length for the rest of the data.
 
-ATF(which presumably stands for "Add to Front") adds the data specified to the *beginning* of the file specified in `bin_path`
-SET sets `bin_path` to the file path specified
-NEW overwrites the data in `bin_path` with the data specified
-UPD runs `echo 1 > /tmp/need_update`
-ATE(which presumably stands for "Add to End") adds the data specified to the *end* of the file specified in `bin_path`
+The commands are as follows,
+
+* ATF(which presumably stands for "Add to Front") adds the data specified to the *beginning* of the file specified in `bin_path`
+* SET sets `bin_path` to the file path specified
+* NEW overwrites the data in `bin_path` with the data specified
+* UPD runs `echo 1 > /tmp/need_update`
+* ATE(which presumably stands for "Add to End") adds the data specified to the *end* of the file specified in `bin_path`
 
 This appears to work as some kind of API to push updates. It's likely only intended to be usable by a local user.
 
@@ -436,15 +438,16 @@ All that's left is to somehow control the mail content. This isn't too hard thou
 * SET file path to /home/mailserver/data/day
 * use NEW to write subject\|/tmp/evil
 * Now we have mail with custom data!
+
 Wait... no. We can't use new to write a pipe character, because all of the fifo API data is being sent through the subject. And the subject, remember, can't include pipes.
 
 Well, now what? We can't instead simply edit the existing content path because the filename is unpredictable.
 
 Recall that we aren't writing just the subject to update.event. We're writing subject + "\|" + content_path. We've been ignoring that but, it'll now become important.
 
-What if our subject was NEW001, for example? The API would receive `NEW001|/tmp/...`, the only relevant parts being `NEW001|`. It would then write a pipe buffer to the file.
+What if our subject was NEW001, for example? The API would receive `NEW001|/tmp/...`, the only relevant parts being `NEW001|`. It would then write a pipe to the file.
 
-Let's instead have the subject be NEW006PWNED. The API would receive `NEW006PWNED|`(since "PWNED" is 5 bytes, it would read the next byte as well, the pipe buffer). This let's us write a pipe buffer after the data we want! Afterwards, we simply use ATE to append the rest.
+Let's instead have the subject be NEW006PWNED. The API would receive `NEW006PWNED|`(since "PWNED" is 5 bytes, it would read the next byte as well, the pipe character). This let's us write a pipe character after the data we want! Afterwards, we simply use ATE to append the rest.
 
 ```python
 def custom_mail(username, data, size=None):
